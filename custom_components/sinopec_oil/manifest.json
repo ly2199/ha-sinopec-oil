@@ -5,7 +5,7 @@
     "@ly2199"
   ],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": ["button", "number", "select", "text", "datetime"],
   "documentation": "https://github.com/ly2199/ha-sinopec-oil",
   "integration_type": "service",
   "iot_class": "cloud_polling",

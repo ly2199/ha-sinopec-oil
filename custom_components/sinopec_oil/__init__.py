@@ -33,7 +33,14 @@ from .store import RefuelStore
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR,
+    Platform.BUTTON,
+    Platform.NUMBER,
+    Platform.SELECT,
+    Platform.TEXT,
+    Platform.DATETIME,
+]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -131,5 +138,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not remaining:
         async_unload_services(hass)
         domain_data.pop("store", None)
+        domain_data.pop("form_created", None)
+        domain_data.pop("form_state", None)
 
     return True

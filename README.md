@@ -140,48 +140,49 @@ service: sinopec_oil.get_price_history
 
 同样数据也挂在 **"油价更新时间"传感器的 `price_history` 属性**中，仪表盘可直接引用。
 
-### 可视化填表录入（不想写 YAML？）
+### 可视化填表录入（推荐：自带表单，零配置）
 
-**方式一：开发者工具直接填表**。开发者工具 → 动作 → 选择
-`sinopec_oil.record_refuel`，界面会渲染出车辆、里程、加油量、费用、
-油品、时间、备注的完整表单，填完点"运行动作"即录入（勾选"响应"可看计算结果）。
+**方式一：集成自带"加油填表"实体（最简单）**。安装集成后 HA 自动出现一个
+**「加油填表」设备**，包含：车辆（下拉，自动列出现有车辆）、里程表读数、
+加油量、加油费用、油品类型、加油时间、备注、**提交加油记录**按钮。
+无需创建任何助手/自动化：
 
-**方式二：仪表盘填表（蓝图）**。本集成自带自动化蓝图 `中石化油价 · 加油记录填表`：
-
-1. 先创建 7 个助手（设置 → 设备与服务 → 助手）：文本×3（车辆名/油品/备注）、
-   数字×3（里程/加油量/费用）、按钮×1（提交）；
-2. 创建自动化 → 蓝图 → 选择"中石化油价 · 加油记录填表"，把 7 个助手对应绑定；
-3. 把下面的卡片加到仪表盘，日常加油在手机上点填即可，提交后表单自动清零：
+1. 仪表盘 → 编辑 → 添加卡片 → **按实体** → 依次勾选「加油填表」设备下的实体
+   （或直接用下方 YAML，实体 ID 以你实例中实际生成的为准）；
+2. 填表 → 点「提交加油记录」→ 弹出通知显示加油量/费用/单价/计价来源/最近油耗，
+   表单自动清零（保留车辆选择）；
+3. 只填加油量 → 自动按当时油价算费用；只填费用 → 自动算加油量；
+   修改「加油时间」为历史日期 → 自动按该日期的历史油价计算；
+   油品选「自动」= 用该车的默认油品。
 
 ```yaml
-type: vertical-stack
-cards:
-  - type: entities
-    title: ⛽ 加油记录
-    entities:
-      - entity: input_text.sinopec_vehicle
-        name: 车辆
-      - entity: input_number.sinopec_odometer
-        name: 里程表读数 (km)
-      - entity: input_number.sinopec_volume
-        name: 加油量 (L，可不填)
-      - entity: input_number.sinopec_cost
-        name: 费用 (元，可不填)
-      - entity: input_text.sinopec_fuel
-        name: 油品 (92/95/0#)
-      - entity: input_text.sinopec_note
-        name: 备注
-  - type: button
+type: entities
+title: ⛽ 加油填表
+entities:
+  - entity: select.zhongshihua_jiayou_tianbiao_cheliang
+    name: 车辆
+  - entity: number.zhongshihua_jiayou_tianbiao_lichengbiao_dushu
+    name: 里程表读数 (km)
+  - entity: number.zhongshihua_jiayou_tianbiao_jiayouliang
+    name: 加油量 (L，可不填)
+  - entity: number.zhongshihua_jiayou_tianbiao_jiayoufeiyong
+    name: 费用 (元，可不填)
+  - entity: select.zhongshihua_jiayou_tianbiao_youpin_leixing
+    name: 油品（自动/92/95/0#…）
+  - entity: datetime.zhongshihua_jiayou_tianbiao_jiayou_shijian
+    name: 加油时间
+  - entity: text.zhongshihua_jiayou_tianbiao_beizhu
+    name: 备注
+  - entity: button.zhongshihua_jiayou_tianbiao_tijiao_jiayou_jilu
     name: 提交加油记录
-    icon: mdi:fuel
-    tap_action:
-      action: perform-action
-      perform_action: input_button.press
-      target:
-        entity_id: input_button.sinopec_submit
 ```
 
-加油量与费用都填 → 单价=费用÷加油量；只填一个 → 另一个按当时油价自动算出。
+**方式二：开发者工具直接填表**。开发者工具 → 动作 → 选择
+`sinopec_oil.record_refuel`，同样会渲染完整表单。
+
+**方式三：自动化蓝图**（需要先创建 7 个助手，适合想把表单嵌入复杂自动化
+的用户）：导入蓝图 `中石化油价 · 加油记录填表`（见
+`blueprints/automation/sinopec_oil/refuel_form.yaml`）。
 
 ### 车辆管理服务
 
