@@ -979,7 +979,11 @@ class VehicleRecentRecordSensor(VehicleStatsSensor):
 
 
 class VehicleQualitySensor(VehicleStatsSensor):
-    """数据质量：时间-里程一致性校验结果（必须修正才能算油耗）。"""
+    """数据质量：时间-里程一致性。
+
+    需修正 = 时间与里程矛盾（该区间被排除在统计之外）；
+    部分缺口 = 有记录缺少里程读数（该区间不参与油耗统计，但不影响其他区间）。
+    """
 
     STAT_KEY = "data_quality"
     STAT_NAME = "数据质量"
@@ -997,20 +1001,30 @@ class VehicleQualitySensor(VehicleStatsSensor):
 
     @property
     def native_value(self) -> str:
-        problems = self._stats().get("quality_problems") or []
-        if not problems:
-            return "正常"
-        return f"需修正（{len(problems)} 项）"
+        stats = self._stats()
+        problems = stats.get("quality_problems") or []
+        if problems:
+            return f"需修正（{len(problems)} 项）"
+        gaps = int(stats.get("odometer_gaps") or 0)
+        if gaps:
+            return f"部分缺口（{gaps} 处）"
+        return "正常"
 
     @property
     def icon(self) -> str:
-        problems = self._stats().get("quality_problems") or []
-        return "mdi:alert-circle" if problems else "mdi:check-circle"
+        stats = self._stats()
+        if stats.get("quality_problems"):
+            return "mdi:alert-circle"
+        if stats.get("odometer_gaps"):
+            return "mdi:alert-outline"
+        return "mdi:check-circle"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        stats = self._stats()
         return {
             "vehicle": self._vehicle,
             "sinopec_role": "sinopec_quality",
-            "problems": self._stats().get("quality_problems") or [],
+            "problems": stats.get("quality_problems") or [],
+            "odometer_gaps": int(stats.get("odometer_gaps") or 0),
         }

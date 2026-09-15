@@ -3,7 +3,7 @@
  *
  * 安装：将本文件复制到 /config/www/sinopec-oil-card.js，然后在
  * 仪表盘 → 右上角 ⋮ → 管理资源 → 添加
- *   URL: /local/sinopec-oil-card.js   版本: 1.0.2
+ *   URL: /local/sinopec-oil-card.js   版本: 1.0.3
  * 使用：仪表盘添加卡片 → 手动 →
  *   type: custom:sinopec-oil-card
  * 可选: title: 我的油卡   vehicle: 某辆车（不填则记住上次选择）
@@ -12,8 +12,9 @@
  * 无需填写任何实体 ID。
  *
  * 页签：加油 · 历史 · 油价 · 统计
- * 规则：油耗计算要求时间-里程对应（相邻区间里程 0 < Δ ≤ 900 km），
- * 冲突记录会被拒绝入库（必须修正才能算）。
+ * 规则：区间油耗由相邻里程差算出（0 < Δ ≤ 900 km）。
+ * 里程可留空 → 该区间记为「缺口」不参与油耗统计，不影响其他区间；
+ * 时间与里程矛盾（Δ ≤ 0 或与紧邻记录 Δ > 900 km）的记录会被拒绝入库。
  */
 (() => {
   const FUEL_OPTIONS = ['自动', '92', '95', '98', '89', '0#', '-10', '-20', '-35', 'LNG'];
@@ -62,6 +63,7 @@
     .msg.ok { background: rgba(76,175,80,.12); color: var(--success-color, #2e7d32); }
     .msg.err { background: rgba(219,68,55,.10); color: var(--error-color, #db4437); }
     .msg.warn { background: rgba(255,152,0,.12); color: var(--warning-color, #ef6c00); }
+    .msg.info { background: var(--secondary-background-color); color: var(--primary-text-color); }
     .msg b { display: block; margin-bottom: 4px; }
     table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
     th { text-align: left; color: var(--secondary-text-color); font-weight: 500; white-space: nowrap;
@@ -228,8 +230,12 @@
     async _call(service, payload, useResponse) {
       this._busy = true; this._error = null; this._render();
       try {
-        const opts = useResponse ? { return_response: true } : undefined;
-        const resp = await this._hass.callService('sinopec_oil', service, payload, opts);
+        // 前端签名：callService(domain, service, serviceData, target, returnResponse)。
+        // return_response 必须作为第 5 个参数传入；放进 target 会被 websocket
+        // 校验拒绝（not a valid option at 'target.return_response'）。
+        const resp = await this._hass.callService(
+          'sinopec_oil', service, payload, undefined, useResponse === true
+        );
         return resp || null;
       } catch (err) {
         this._error = (err && err.message) || String(err);
@@ -253,10 +259,6 @@
       if (f.note) payload.note = f.note;
       if (payload.volume == null && payload.total_cost == null) {
         this._error = '请至少填写加油量或费用之一（都填则自动算单价）。';
-        this._render(); return;
-      }
-      if (payload.odometer == null) {
-        this._error = '请填写里程表读数：油耗计算要求每条记录都有里程（框内已自动带出上次读数）。';
         this._render(); return;
       }
       try {
@@ -298,17 +300,38 @@
       const out = [];
       for (const line of lines) {
         if (/^(日期|date)/i.test(line)) continue; // 表头
-        const parts = line.split(/[,;\t，]+/).map((p) => p.trim()).filter((p) => p !== '');
-        if (parts.length < 2) { out.push({ raw: line, error: '至少需要 日期,里程' }); continue; }
+        // 保留空单元格以维持列位置（否则 "日期,,41.2,338" 会被错位解析），
+        // 只去掉行尾的空列
+        const parts = line.split(/[,;\t，]/).map((p) => p.trim());
+        while (parts.length && parts[parts.length - 1] === '') parts.pop();
+        if (!parts.length || !parts[0]) {
+          out.push({ raw: line, error: '缺少日期' });
+          continue;
+        }
         const [date, odo, vol, cost, fuel, ...noteParts] = parts;
         const rec = { date: date.length === 10 ? date + 'T12:00:00' : date };
-        const o = parseFloat(odo);
-        if (isNaN(o)) { out.push({ raw: line, error: '里程不是数字' }); continue; }
-        rec.odometer = o;
-        if (vol && !isNaN(parseFloat(vol))) rec.volume = parseFloat(vol);
-        if (cost && !isNaN(parseFloat(cost))) rec.total_cost = parseFloat(cost);
+        // 里程可留空：该行照常入库，只是这个区间不参与油耗统计
+        if (odo) {
+          const o = parseFloat(odo);
+          if (isNaN(o)) { out.push({ raw: line, error: `里程不是数字：${odo}` }); continue; }
+          rec.odometer = o;
+        }
+        if (vol) {
+          const v = parseFloat(vol);
+          if (isNaN(v)) { out.push({ raw: line, error: `加油量不是数字：${vol}` }); continue; }
+          rec.volume = v;
+        }
+        if (cost) {
+          const c = parseFloat(cost);
+          if (isNaN(c)) { out.push({ raw: line, error: `费用不是数字：${cost}` }); continue; }
+          rec.total_cost = c;
+        }
+        if (rec.volume == null && rec.total_cost == null) {
+          out.push({ raw: line, error: '加油量与费用至少填一项' });
+          continue;
+        }
         if (fuel) rec.fuel_type = fuel;
-        if (noteParts.length) rec.note = noteParts.join(' ');
+        if (noteParts.length) rec.note = noteParts.filter(Boolean).join(' ');
         out.push({ raw: line, record: rec });
       }
       return out;
@@ -427,7 +450,7 @@
         <div class="row">
           <div class="field"><label>加油时间（改历史日期=按当时油价）</label>
             <input type="datetime-local" data-f="date" value="${esc(f.date || this._nowLocal())}"></div>
-          <div class="field"><label>里程表读数 km（需大于上次 ${esc(cur)}）</label>
+          <div class="field"><label>里程表读数 km（可留空；上次 ${esc(cur)}）</label>
             <input type="number" step="0.1" min="0" data-f="odometer" value="${esc(f.odometer)}"></div>
         </div>
         <div class="row">
@@ -446,7 +469,9 @@
             <ha-icon icon="mdi:send"></ha-icon>${this._busy ? '提交中…' : '提交加油记录'}</button>
         </div>
         ${resultHtml}
-        <div class="hint">只填量 → 按当日/历史油价算费用；只填费用 → 反算加油量；里程与时间需与上次记录递增对应（区间 ≤ 900 km）。</div>`;
+        <div class="hint">只填量 → 按当日/历史油价算费用；只填费用 → 反算加油量。
+          里程表读数用于计算区间油耗，<b>留空则该区间不计入统计</b>（不影响其他区间）；
+          时间与里程互相矛盾（区间 ≤ 0 或 > 900 km）会被拒绝入库并说明原因。</div>`;
     }
 
     _nowLocal() {
@@ -460,11 +485,17 @@
       const recs = this._records();
       const q = this._qualityEntity();
       const problems = (q && q.attributes.problems) || [];
+      const gaps = Number((q && q.attributes.odometer_gaps) || 0);
       let html = '';
       if (problems.length) {
         html += `<div class="msg warn"><ha-icon icon="mdi:alert-outline"></ha-icon>
-          <div><b>数据需修正（${problems.length} 项）——修正前油耗不可用</b>
+          <div><b>数据需修正（${problems.length} 项）——这些区间已排除在统计外，其余照常计算</b>
           ${problems.map((p) => `• ${esc(p)}`).join('<br>')}</div></div>`;
+      }
+      if (gaps) {
+        html += `<div class="msg info"><ha-icon icon="mdi:information-outline"></ha-icon>
+          <div><b>${gaps} 处区间缺少里程读数</b>
+          这些区间不参与油耗统计，不影响其他区间；补上里程即可自动恢复。</div></div>`;
       }
       if (!recs.length) {
         html += `<div class="empty">暂无记录。可在「加油」页签录入，或用下方批量导入。</div>`;
@@ -507,8 +538,9 @@
         const ir = this._importResult;
         html += `
           <div class="editbox">
-            <div class="hint">每行一条：<b>日期, 里程, 加油量, 费用, [油品], [备注]</b>（逗号/分号/Tab 分隔；日期如 2026-08-01 或 2026-08-01 14:30；量与费用可只填一项）</div>
-            <textarea data-f="import" placeholder="2026-08-01, 11800, 41.2, 338.5, 92, 中石化&#10;2026-08-20, 12350, 40.8, 335.0, 92, 优惠0.3">${esc(this._importText)}</textarea>
+            <div class="hint">每行一条：<b>日期, 里程, 加油量, 费用, [油品], [备注]</b>（逗号/分号/Tab 分隔；日期如 2026-08-01 或 2026-08-01 14:30；量与费用可只填一项）<br>
+              <b>里程可以留空</b>，那一列写空即可（如 <code>2026-08-01, , 41.2, 338.5</code>）——该行照常入库，只是这个区间不参与油耗统计。</div>
+            <textarea data-f="import" placeholder="2026-07-05, 11800, 41.2, 338.5, 92, 中石化&#10;2026-07-20, , 40.8, 335.0, 92, 里程缺失也可导入&#10;2026-08-20, 12350, , 335.0, 92, 只填费用">${esc(this._importText)}</textarea>
             <div class="flexright"><button class="btn" data-action="do-import" ${this._busy ? 'disabled' : ''}>导入</button></div>
             ${ir ? (ir.imported ? `<div class="msg ok"><ha-icon icon="mdi:check-circle-outline"></ha-icon><div><b>导入 ${ir.imported} 条</b>${ir.rejected && ir.rejected.length ? `另有 ${ir.rejected.length} 条被拒绝：<br>${ir.rejected.map((x) => `• ${esc(x)}`).join('<br>')}` : ''}</div></div>` : (ir.rejected && ir.rejected.length ? `<div class="msg err"><ha-icon icon="mdi:alert-circle-outline"></ha-icon><div><b>全部被拒绝</b>${ir.rejected.map((x) => `• ${esc(x)}`).join('<br>')}</div></div>` : '')) : ''}
           </div>`;
@@ -635,11 +667,13 @@
       const s = this._stats();
       const q = this._qualityEntity();
       const problems = (q && q.attributes.problems) || [];
+      const gaps = Number((q && q.attributes.odometer_gaps) || 0);
       const tile = (v, k, d = 2) =>
         `<div class="stat"><div class="v">${v == null ? '—' : fmt(v, d)}</div><div class="k">${k}</div></div>`;
 
       return `
-        ${problems.length ? `<div class="msg warn"><ha-icon icon="mdi:alert-outline"></ha-icon><div><b>数据需修正（${problems.length} 项）——以下油耗相关指标不可用</b>${problems.map((p) => `• ${esc(p)}`).join('<br>')}</div></div>` : ''}
+        ${problems.length ? `<div class="msg warn"><ha-icon icon="mdi:alert-outline"></ha-icon><div><b>数据需修正（${problems.length} 项）——这些区间已排除在统计外</b>${problems.map((p) => `• ${esc(p)}`).join('<br>')}</div></div>` : ''}
+        ${gaps ? `<div class="msg info"><ha-icon icon="mdi:information-outline"></ha-icon><div><b>${gaps} 处区间缺少里程读数</b>未计入里程与油耗统计。</div></div>` : ''}
         <div class="grid">
           ${tile(s.odometer, '当前里程 km', 1)}
           <div class="stat"><div class="v">${esc(s.refuel_count == null ? '—' : s.refuel_count)}</div><div class="k">加油次数</div></div>

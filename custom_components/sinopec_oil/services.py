@@ -200,17 +200,18 @@ def _validate_segment_order(
     new_date: str,
     exclude_date: str | None = None,
 ) -> None:
-    """校验新记录插入时间序后与前后记录的里程一致性（阻止入库）。
+    """校验新记录插入时间序后与相邻记录的里程是否矛盾（矛盾则阻止入库）。
 
-    【必须修正才能算】：时间与里程不对应（区间里程 ≤ 0 或 > 900 km）
-    的记录不允许写入，须修正后重试。edit 场景通过 exclude_date
-    排除被编辑记录本身，只校验其与前后邻居的区间。
+    - 本次没有里程读数：无法校验，直接通过（只算该区间缺口，
+      不影响其他区间的油耗统计）。
+    - 与时间上最近的一条「有里程读数」的相邻记录比较，要求里程严格递增；
+      若两者之间还夹着缺少里程的记录，跨度天然覆盖多个加油区间，
+      此时只校验递增、不套用单区间 900 km 上限。
+
+    edit 场景通过 exclude_date 排除被编辑记录本身，只校验与前后邻居的区间。
     """
     if new_odometer is None:
-        raise HomeAssistantError(
-            "里程表读数（odometer）不能为空：油耗计算要求每条记录都有"
-            "里程读数，请补充后重试。"
-        )
+        return
 
     records = store.get_records_sorted(vehicle)
     if exclude_date is not None:
@@ -218,48 +219,51 @@ def _validate_segment_order(
             r for r in records if str(r.get("date", "")) != exclude_date
         ]
 
-    prev = None
-    nxt = None
-    for rec in records:
-        rec_date = str(rec.get("date", ""))
-        if rec_date <= new_date:
-            prev = rec
-        else:
-            nxt = rec
-            break
+    before = [r for r in records if str(r.get("date", "")) <= new_date]
+    after = [r for r in records if str(r.get("date", "")) > new_date]
+
+    def _nearest_with_odometer(items):
+        """返回 (记录, 中间跳过的无里程记录数)，最近的优先。"""
+        skipped = 0
+        for rec in items:
+            if _to_float(rec.get("odometer")) is not None:
+                return rec, skipped
+            skipped += 1
+        return None, 0
+
+    prev, prev_gap = _nearest_with_odometer(reversed(before))
+    nxt, next_gap = _nearest_with_odometer(after)
 
     if prev is not None:
         prev_odo = _to_float(prev.get("odometer"))
-        if prev_odo is not None:
-            diff = new_odometer - prev_odo
-            if diff <= 0:
-                raise HomeAssistantError(
-                    f"时间顺序与里程不一致：{new_date} 的里程 {new_odometer} "
-                    f"不大于 {prev.get('date')} 的 {prev_odo}（相邻加油区间"
-                    "里程必须为正）。请修正里程或时间后重试，本次未保存。"
-                )
-            if diff > MAX_SEGMENT_KM:
-                raise HomeAssistantError(
-                    f"区间里程超限：{new_date} 与 {prev.get('date')} 之间"
-                    f"相差 {round(diff, 1)} km，超过单次加油区间 {MAX_SEGMENT_KM:g} km "
-                    "上限。请核对里程表读数或加油时间，本次未保存。"
-                )
+        diff = new_odometer - prev_odo
+        if diff <= 0:
+            raise HomeAssistantError(
+                f"时间顺序与里程不一致：{new_date} 的里程 {new_odometer} "
+                f"不大于 {prev.get('date')} 的 {prev_odo}（相邻加油区间"
+                "里程必须为正）。请修正里程或时间后重试，本次未保存。"
+            )
+        if prev_gap == 0 and diff > MAX_SEGMENT_KM:
+            raise HomeAssistantError(
+                f"区间里程超限：{new_date} 与 {prev.get('date')} 之间"
+                f"相差 {round(diff, 1)} km，超过单次加油区间 {MAX_SEGMENT_KM:g} km "
+                "上限。请核对里程表读数或加油时间，本次未保存。"
+            )
     if nxt is not None:
         nxt_odo = _to_float(nxt.get("odometer"))
-        if nxt_odo is not None:
-            diff = nxt_odo - new_odometer
-            if diff <= 0:
-                raise HomeAssistantError(
-                    f"时间顺序与里程不一致：{nxt.get('date')} 的里程 {nxt_odo} "
-                    f"不大于本次（{new_date}）的 {new_odometer}（历史补录需保持"
-                    "时间与里程同步递增）。请修正后重试，本次未保存。"
-                )
-            if diff > MAX_SEGMENT_KM:
-                raise HomeAssistantError(
-                    f"区间里程超限：{nxt.get('date')} 与本次（{new_date}）之间"
-                    f"相差 {round(diff, 1)} km，超过 {MAX_SEGMENT_KM:g} km 上限。"
-                    "请核对里程或时间，本次未保存。"
-                )
+        diff = nxt_odo - new_odometer
+        if diff <= 0:
+            raise HomeAssistantError(
+                f"时间顺序与里程不一致：{nxt.get('date')} 的里程 {nxt_odo} "
+                f"不大于本次（{new_date}）的 {new_odometer}（历史补录需保持"
+                "时间与里程同步递增）。请修正后重试，本次未保存。"
+            )
+        if next_gap == 0 and diff > MAX_SEGMENT_KM:
+            raise HomeAssistantError(
+                f"区间里程超限：{nxt.get('date')} 与本次（{new_date}）之间"
+                f"相差 {round(diff, 1)} km，超过 {MAX_SEGMENT_KM:g} km 上限。"
+                "请核对里程或时间，本次未保存。"
+            )
 
 
 def _get_runtime_datas(hass: HomeAssistant) -> list[SinopecOilRuntimeData]:
@@ -461,7 +465,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             call.hass, data, vehicle_info, runtime
         )
         record = built.record
-        # 【必须修正才能算】时间-里程一致性校验，不通过则阻止入库
+        # 时间-里程矛盾则阻止入库；缺少里程只算缺口，允许写入
         _validate_segment_order(
             store, vehicle, record["odometer"], record["date"]
         )
@@ -528,7 +532,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 call.hass, dict(item), vehicle_info, runtime
             )
             record = built.record
-            # 【必须修正才能算】逐行校验，冲突行拒绝并报告原因（其余行正常导入）
+            # 逐行校验，矛盾行拒绝并报告原因（其余行正常导入；缺里程不算矛盾）
             try:
                 _validate_segment_order(
                     store, vehicle, record["odometer"], record["date"]
@@ -695,8 +699,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             call.hass, merged, vehicle_info, runtime
         )
         new_record = new_built.record
-        # 【必须修正才能算】编辑后的记录与其前后邻居区间校验
-        # （排除原记录本身；其余既有问题不阻止本次修正）
+        # 编辑后的记录与其前后邻居区间校验（排除原记录本身）
         _validate_segment_order(
             store,
             vehicle,
