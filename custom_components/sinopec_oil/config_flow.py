@@ -34,7 +34,6 @@ from .const import (
     CONF_VEHICLE,
     DEFAULT_PROVINCE,
     DEFAULT_SCAN_INTERVAL_MINUTES,
-    DEFAULT_VEHICLE_NAME,
     DOMAIN,
     PROVINCES,
     SIGNAL_VEHICLE_ADDED,
@@ -129,8 +128,6 @@ class SinopecOilConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             province = user_input[CONF_PROVINCE]
-            await self.async_set_unique_id(f"{DOMAIN}_{province}")
-            self._abort_if_unique_id_configured()
             try:
                 self._areas = await _fetch_areas(province)
             except SinopecOilApiClientError:
@@ -138,7 +135,10 @@ class SinopecOilConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 self._province = province
                 if self._areas:
+                    # 价区也参与唯一标识，待价区选定后再登记
                     return await self.async_step_area()
+                await self.async_set_unique_id(f"{DOMAIN}_{province}")
+                self._abort_if_unique_id_configured()
                 return await self.async_step_vehicle()
 
         schema = vol.Schema(
@@ -159,13 +159,18 @@ class SinopecOilConfigFlow(ConfigFlow, domain=DOMAIN):
         """Step 2: choose price area (only for provinces with areas)."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            area_id = user_input[CONF_AREA]
-            self._area_id = str(area_id)
+            area_id = str(user_input[CONF_AREA])
+            # 唯一标识 = 省份 + 价区，同省不同价区可以并存
+            await self.async_set_unique_id(
+                f"{DOMAIN}_{self._province}_{area_id}"
+            )
+            self._abort_if_unique_id_configured()
+            self._area_id = area_id
             self._area_name = next(
                 (
                     a["name"]
                     for a in self._areas
-                    if a["id"] == str(area_id)
+                    if a["id"] == area_id
                 ),
                 None,
             )
@@ -255,7 +260,6 @@ class SinopecOilOptionsFlow(OptionsFlow):
         self._area_id: str | None = None
         self._scan_interval: int | None = None
         self._areas: list[dict[str, Any]] = []
-        self._settings_ready = False
         self._vehicle_name: str | None = None
         self._manage_vehicle: str | None = None
 
@@ -305,7 +309,6 @@ class SinopecOilOptionsFlow(OptionsFlow):
                     user_input[CONF_SCAN_INTERVAL]
                 )
                 self._area_id = None
-                self._settings_ready = True
                 if self._areas:
                     return await self.async_step_area()
                 return await self._async_save_settings()
@@ -341,12 +344,19 @@ class SinopecOilOptionsFlow(OptionsFlow):
         schema = vol.Schema(
             {
                 vol.Required(
-                    CONF_AREA,
-                    default=(self._areas[0]["id"] if self._areas else None),
+                    CONF_AREA, default=self._default_area_id()
                 ): _area_selector(self._areas),
             }
         )
         return self.async_show_form(step_id="area", data_schema=schema)
+
+    def _default_area_id(self) -> str | None:
+        """默认选中当前已配置的价区（若仍存在），否则价区列表第一项。"""
+        current = self._entry.options.get(CONF_AREA)
+        ids = [a["id"] for a in self._areas]
+        if current in ids:
+            return current
+        return ids[0] if ids else None
 
     async def _async_save_settings(self) -> ConfigFlowResult:
         """Write province/area/interval into options."""
@@ -358,12 +368,11 @@ class SinopecOilOptionsFlow(OptionsFlow):
             new_options[CONF_AREA] = self._area_id
         if self._scan_interval:
             new_options[CONF_SCAN_INTERVAL] = self._scan_interval
-        self._settings_ready = False
-        # 直接写入并 reload，然后返回菜单
+        # 写入后由 __init__ 注册的 update listener 触发 reload；
+        # 此处不能再显式 reload，否则会重载两次。
         self.hass.config_entries.async_update_entry(
             self._entry, options=new_options
         )
-        await self.hass.config_entries.async_reload(self._entry.entry_id)
         return await self.async_step_init()
 
     # ------------------------------------------------------------------

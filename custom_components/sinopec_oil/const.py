@@ -13,13 +13,11 @@ CONF_SCAN_INTERVAL: Final = "scan_interval"
 
 # 车辆配置
 CONF_VEHICLE: Final = "vehicle"
-CONF_VEHICLES: Final = "vehicles"
 CONF_INITIAL_ODOMETER: Final = "initial_odometer"
 CONF_FUEL_TYPE: Final = "fuel_type"
 
 DEFAULT_PROVINCE: Final = "11"  # 默认省份：北京
 DEFAULT_SCAN_INTERVAL_MINUTES: Final = 60
-DEFAULT_VEHICLE_NAME: Final = "我的车"
 
 # --- 单位 ---
 UNIT_YUAN_PER_LITER: Final = "元/L"
@@ -112,6 +110,16 @@ OIL_TYPE_MAP: Final[dict[str, tuple[str, str]]] = {
     "CNG": ("CNG", "CNG天然气"),
     "L_CNG": ("L_CNG", "L-CNG天然气"),
 }
+
+# --- 数据字段名 → 中文标签（OIL_TYPE_MAP 的反向映射） ---
+# 历史油价等结构化数据一律使用数据字段名（GAS_92 等）作为 key，
+# 保证前端/自动化取值稳定；展示时再用本表转成中文。
+OIL_TYPE_LABELS: Final[dict[str, str]] = {
+    data_key: label for _, (data_key, label) in OIL_TYPE_MAP.items()
+}
+
+# --- 全部数据字段名集合（用于从接口原始行中挑出油价字段） ---
+OIL_DATA_KEYS: Final[frozenset[str]] = frozenset(OIL_TYPE_LABELS)
 
 # --- 常用油品别名 → 候选数据字段（按优先级） ---
 # 用于把用户输入的 "92"/"95"/"0#"/"柴油" 等映射到实际数据字段

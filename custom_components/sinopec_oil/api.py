@@ -28,6 +28,7 @@ import aiohttp
 
 from .const import (
     BASE_URL,
+    OIL_DATA_KEYS,
     OIL_TYPE_MAP,
     PAGE_URL,
     PROVINCES,
@@ -59,13 +60,17 @@ class OilPriceData:
     province_name: str
     area_id: str | None = None
     area_name: str | None = None
+    area_desc: str | None = None
     to_day: str | None = None
     update_time: str | None = None
+    server_time: str | None = None
+    period_id: int | None = None
     prices: dict[str, float] = field(default_factory=dict)
+    # 相对上一期的涨跌额（接口 _STATUS，带符号：正=上调，负=下调，0=搁浅）
     changes: dict[str, float] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
     # 历史调价周期（由 coordinator 附加填充）：
-    # [{start, end, prices: {中文油品名: 价格}}, ...]，按时间倒序
+    # [{start, end, period_id, prices, changes}, ...]，按时间倒序
     price_history: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -89,7 +94,9 @@ class HistoryPeriod:
 
     start: dt_date
     end: dt_date
+    period_id: int | None = None
     prices: dict[str, float] = field(default_factory=dict)
+    changes: dict[str, float] = field(default_factory=dict)
 
 
 class SinopecOilApiClient:
@@ -217,19 +224,27 @@ class SinopecOilApiClient:
             prices[data_key] = float(value)
             labels[data_key] = label
             status = pdata.get(f"{data_key}_STATUS")
-            if isinstance(status, (int, float)):
+            if isinstance(status, (int, float)) and not isinstance(status, bool):
                 changes[data_key] = float(status)
 
         if not prices:
             raise SinopecOilInvalidData("No valid oil price found in the response")
 
+        area_desc = str(check.get("AREA_DESC") or "").strip() or None
+        period_id = pdata.get("PERIOD_ID")
+
         return OilPriceData(
             province_id=self.province_id,
-            province_name=self.province_name,
+            # 接口返回的名称优先（可能与内置省份表措辞不同）
+            province_name=str(check.get("PROVINCE_NAME") or self.province_name),
             area_id=self.area_id,
             area_name=area_name,
+            area_desc=area_desc,
             to_day=raw.get("toDay"),
             update_time=pdata.get("START_DATE"),
+            server_time=raw.get("nowTime"),
+            period_id=int(period_id) if isinstance(period_id, (int, float))
+            and not isinstance(period_id, bool) else None,
             prices=prices,
             changes=changes,
             labels=labels,
@@ -289,13 +304,35 @@ class SinopecOilApiClient:
             end = _parse_date_str(row.get("END_TIME"))
             if start is None or end is None:
                 continue
-            prices = {
-                key: float(value)
-                for key, value in row.items()
-                if key in {dk for _, (dk, _) in OIL_TYPE_MAP.items()}
-                and _is_valid_price(value)
-            }
-            periods.append(HistoryPeriod(start=start, end=end, prices=prices))
+            prices: dict[str, float] = {}
+            changes: dict[str, float] = {}
+            for key in OIL_DATA_KEYS:
+                value = row.get(key)
+                if not _is_valid_price(value):
+                    continue
+                prices[key] = float(value)
+                status = row.get(f"{key}_STATUS")
+                if isinstance(status, (int, float)) and not isinstance(
+                    status, bool
+                ):
+                    changes[key] = float(status)
+            if not prices:
+                continue
+            period_id = row.get("PERIOD_ID")
+            periods.append(
+                HistoryPeriod(
+                    start=start,
+                    end=end,
+                    period_id=(
+                        int(period_id)
+                        if isinstance(period_id, (int, float))
+                        and not isinstance(period_id, bool)
+                        else None
+                    ),
+                    prices=prices,
+                    changes=changes,
+                )
+            )
 
         if not periods:
             raise SinopecOilInvalidData("No valid historical price periods")
@@ -353,31 +390,30 @@ class SinopecOilApiClient:
             )
         return None
 
+    @staticmethod
     def history_to_payload(
-        self, periods: list[HistoryPeriod]
+        periods: list[HistoryPeriod],
     ) -> list[dict[str, Any]]:
-        """Convert history periods to a JSON-friendly list with Chinese labels.
+        """Convert history periods to a JSON-friendly list.
 
-        输出：[{start: "2026-09-12", end: "2026-09-24",
-                prices: {"92号汽油": 8.44, ...}}, ...]（按时间倒序）。
+        输出：[{start: "2026-09-12", end: "2026-09-24", period_id: 146,
+                prices: {"GAS_92": 8.29, ...},
+                changes: {"GAS_92": 0.2, ...}}, ...]（按时间倒序）。
+
+        prices/changes 一律使用稳定的数据字段名（非中文标签），
+        前端与自动化取值不会因文案调整而失效；
+        展示用中文标签见 const.OIL_TYPE_LABELS。
         """
-        # 数据字段名 → 中文标签（OIL_TYPE_MAP 的键是开关键，需反向映射）
-        label_by_key = {
-            data_key: label for _, (data_key, label) in OIL_TYPE_MAP.items()
-        }
-        out: list[dict[str, Any]] = []
-        for period in periods:
-            prices: dict[str, float] = {}
-            for key, price in period.prices.items():
-                prices[label_by_key.get(key, key)] = price
-            out.append(
-                {
-                    "start": period.start.isoformat(),
-                    "end": period.end.isoformat(),
-                    "prices": prices,
-                }
-            )
-        return out
+        return [
+            {
+                "start": period.start.isoformat(),
+                "end": period.end.isoformat(),
+                "period_id": period.period_id,
+                "prices": dict(period.prices),
+                "changes": dict(period.changes),
+            }
+            for period in periods
+        ]
 
     # ------------------------------------------------------------------
     # 价区列表（供配置流选择）
@@ -429,7 +465,7 @@ def resolve_fuel_keys(fuel_type: str) -> tuple[str, ...]:
     if normalized in FUEL_TYPE_ALIASES:
         return FUEL_TYPE_ALIASES[normalized]
     upper = (fuel_type or "").strip().upper()
-    if upper in {dk for _, (dk, _) in OIL_TYPE_MAP.items()}:
+    if upper in OIL_DATA_KEYS:
         return (upper,)
     # 模糊匹配：输入包含别名键（如 "92号"、"0#柴油"）
     for alias, keys in FUEL_TYPE_ALIASES.items():

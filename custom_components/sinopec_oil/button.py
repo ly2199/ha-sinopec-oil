@@ -4,7 +4,8 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.button import ButtonEntity
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
@@ -20,21 +21,28 @@ from .const import (
     SIGNAL_VEHICLE_REMOVED,
 )
 from .coordinator import SinopecOilRuntimeData
-from .form import build_service_data, form_device, get_form_state
+from .form import (
+    build_service_data,
+    claim_form_platform,
+    form_device,
+    get_form_state,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 SIGNAL_FORM_SUBMITTED = f"{DOMAIN}_form_submitted"
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Set up the submit button (only once across entries)."""
-    domain_data = hass.data.setdefault(DOMAIN, {})
-    if domain_data.get("form_created"):
+    if not claim_form_platform(hass, entry.entry_id, "button"):
         return
-    domain_data["form_created"] = True
     runtime: SinopecOilRuntimeData = entry.runtime_data
-    async_add_entities([RefuelSubmitButton(hass, runtime)])
+    async_add_entities([RefuelSubmitButton(runtime)])
 
 
 class RefuelSubmitButton(CoordinatorEntity, ButtonEntity):
@@ -45,10 +53,9 @@ class RefuelSubmitButton(CoordinatorEntity, ButtonEntity):
     _attr_icon = "mdi:fuel"
     _attr_unique_id = "refuel_form_submit"
 
-    def __init__(self, hass: HomeAssistant, runtime: SinopecOilRuntimeData) -> None:
+    def __init__(self, runtime: SinopecOilRuntimeData) -> None:
         """Initialize the button."""
         super().__init__(runtime.refuel_coordinator)
-        self.hass = hass
         self._runtime = runtime
         self._attr_device_info = form_device()
 

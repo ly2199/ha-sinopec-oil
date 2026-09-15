@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from homeassistant.components.text import TextEntity
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
 )
@@ -11,17 +12,19 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .button import SIGNAL_FORM_SUBMITTED
 from .coordinator import SinopecOilRuntimeData
-from .form import form_device, get_form_state
+from .form import claim_form_platform, form_device, get_form_state
 
 
-async def async_setup_entry(hass, entry, async_add_entities: AddEntitiesCallback):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Set up the form text entity (only once across entries)."""
-    domain_data = hass.data.setdefault(DOMAIN, {})
-    if domain_data.get("form_created"):
+    if not claim_form_platform(hass, entry.entry_id, "text"):
         return
-    domain_data["form_created"] = True
     runtime: SinopecOilRuntimeData = entry.runtime_data
-    async_add_entities([NoteText(hass, runtime)])
+    async_add_entities([NoteText(runtime)])
 
 
 class NoteText(CoordinatorEntity, TextEntity):
@@ -33,11 +36,9 @@ class NoteText(CoordinatorEntity, TextEntity):
     _attr_native_max = 255
     _attr_unique_id = "refuel_form_note"
 
-    def __init__(self, hass: HomeAssistant, runtime: SinopecOilRuntimeData) -> None:
+    def __init__(self, runtime: SinopecOilRuntimeData) -> None:
         """Initialize."""
         super().__init__(runtime.refuel_coordinator)
-        self.hass = hass
-        self._runtime = runtime
         self._attr_device_info = form_device()
 
     async def async_added_to_hass(self) -> None:

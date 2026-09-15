@@ -363,18 +363,19 @@ class RefuelStore:
         """Replace the record at sorted `index` with `updates`.
 
         `updates` 应为完整的新记录内容（由服务层智能重算后给出）。
-        返回替换后的记录；序号越界返回 None。
+        返回替换后的记录；序号越界或未命中返回 None。
         """
         records_sorted = self._records_by_date(vehicle)
         if index < 0 or index >= len(records_sorted):
             return None
+        target = records_sorted[index]
         stored = self.vehicles.get(vehicle, {}).get("records", [])
         for i, rec in enumerate(stored):
-            if rec is records_sorted[index]:
+            if rec is target:
                 stored[i] = dict(updates)
-                break
-        await self._async_save()
-        return stored[i] if stored else None
+                await self._async_save()
+                return stored[i]
+        return None
 
     async def async_clear_vehicle(self, vehicle: str) -> bool:
         """Remove all records of a vehicle. Return True if it existed."""

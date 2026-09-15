@@ -5,6 +5,7 @@ from homeassistant.components.number import (
     NumberEntity,
     NumberMode,
 )
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -12,22 +13,24 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .button import SIGNAL_FORM_SUBMITTED
 from .coordinator import SinopecOilRuntimeData
-from .form import form_device, get_form_state
+from .form import claim_form_platform, form_device, get_form_state
 from .const import UNIT_KM, UNIT_LITER, UNIT_YUAN
 
 
-async def async_setup_entry(hass, entry, async_add_entities: AddEntitiesCallback):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Set up the form number entities (only once across entries)."""
-    domain_data = hass.data.setdefault(DOMAIN, {})
-    if domain_data.get("form_created"):
+    if not claim_form_platform(hass, entry.entry_id, "number"):
         return
-    domain_data["form_created"] = True
     runtime: SinopecOilRuntimeData = entry.runtime_data
     async_add_entities(
         [
-            OdometerNumber(hass, runtime),
-            VolumeNumber(hass, runtime),
-            CostNumber(hass, runtime),
+            OdometerNumber(runtime),
+            VolumeNumber(runtime),
+            CostNumber(runtime),
         ]
     )
 
@@ -41,13 +44,9 @@ class _FormNumberBase(CoordinatorEntity, NumberEntity):
     _attr_has_entity_name = True
     _attr_mode = NumberMode.BOX
 
-    def __init__(
-        self, hass: HomeAssistant, runtime: SinopecOilRuntimeData
-    ) -> None:
+    def __init__(self, runtime: SinopecOilRuntimeData) -> None:
         """Initialize."""
         super().__init__(runtime.refuel_coordinator)
-        self.hass = hass
-        self._runtime = runtime
         self._attr_device_info = form_device()
 
     async def async_added_to_hass(self) -> None:

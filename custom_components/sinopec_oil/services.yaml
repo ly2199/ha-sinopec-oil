@@ -14,8 +14,10 @@ record_refuel:
         text:
     odometer:
       name: 里程表读数
-      description: 加油时的总里程表读数（公里）。用于里程与油耗统计，建议填写。
-      required: false
+      description: >-
+        加油时的总里程表读数（公里）。必填：区间油耗依赖相邻两次加油的里程差，
+        缺失或与时间顺序不符的记录会被拒绝入库。卡片与内置填表会自动带出上次读数。
+      required: true
       example: 12345
       selector:
         number:
@@ -154,7 +156,7 @@ remove_vehicle:
       selector:
         text:
 
-clear_vehicle:
+clear_vehicle_data:
   name: 清空加油记录
   description: 清空某辆车的全部加油记录并重新计算统计（保留车辆本身）。
   fields:

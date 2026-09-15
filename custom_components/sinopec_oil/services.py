@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date as dt_date, datetime
 from typing import Any
 
@@ -20,10 +21,9 @@ from homeassistant.util import dt as dt_util
 
 from .api import SinopecOilApiClientError, resolve_fuel_keys
 from .const import (
-    CONF_FUEL_TYPE,
     CONF_INITIAL_ODOMETER,
-    CONF_VEHICLE,
     DOMAIN,
+    OIL_TYPE_LABELS,
     SERVICE_ADD_VEHICLE,
     SERVICE_CLEAR_VEHICLE,
     SERVICE_DELETE_RECORD,
@@ -171,6 +171,28 @@ def _get_store(hass: HomeAssistant):
 MAX_SEGMENT_KM = 900.0  # 每次加油区间的合理里程上限（超限视为里程/时间不符）
 
 
+@dataclass
+class _BuiltRecord:
+    """智能计价结果。
+
+    record 为入库内容（字段与存储格式一致）；
+    price_source/price_approximate 是本次计算的说明，只用于服务响应，
+    不写入存储（避免内部字段污染持久化数据）。
+    """
+
+    record: dict[str, Any]
+    price_source: str | None = None
+    price_approximate: bool = False
+
+
+def _import_sort_key(item: dict[str, Any], now: datetime) -> str:
+    """批量导入的排序键：缺失日期的条目按当前时间参与排序。"""
+    value = item.get(ATTR_DATE) or now
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
 def _validate_segment_order(
     store,
     vehicle: str,
@@ -287,7 +309,7 @@ async def _async_build_record(
     data: dict[str, Any],
     vehicle_info: dict[str, Any] | None,
     runtime: SinopecOilRuntimeData | None,
-) -> dict[str, Any]:
+) -> _BuiltRecord:
     """Build a refuel record with smart price/volume/cost calculation.
 
     智能计算规则：
@@ -386,18 +408,20 @@ async def _async_build_record(
 
     odometer = data.get(ATTR_ODOMETER)
 
-    return {
-        "date": when.isoformat(timespec="seconds"),
-        "odometer": _to_float(odometer),
-        "volume": _to_float(volume),
-        "total_cost": _to_float(total_cost),
-        "price": price_value,
-        "fuel_type": fuel_input or "",
-        "fuel_key": fuel_key,
-        "note": data.get(ATTR_NOTE) or "",
-        "_price_source": price_source,
-        "_price_approximate": price_approx,
-    }
+    return _BuiltRecord(
+        record={
+            "date": when.isoformat(timespec="seconds"),
+            "odometer": _to_float(odometer),
+            "volume": _to_float(volume),
+            "total_cost": _to_float(total_cost),
+            "price": price_value,
+            "fuel_type": fuel_input or "",
+            "fuel_key": fuel_key,
+            "note": data.get(ATTR_NOTE) or "",
+        },
+        price_source=price_source,
+        price_approximate=price_approx,
+    )
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:
@@ -433,9 +457,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             runtime = rt
             break
 
-        record = await _async_build_record(
+        built = await _async_build_record(
             call.hass, data, vehicle_info, runtime
         )
+        record = built.record
         # 【必须修正才能算】时间-里程一致性校验，不通过则阻止入库
         _validate_segment_order(
             store, vehicle, record["odometer"], record["date"]
@@ -453,8 +478,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             ATTR_VOLUME: record["volume"],
             ATTR_TOTAL_COST: record["total_cost"],
             ATTR_PRICE: record["price"],
-            "price_source": record["_price_source"],
-            "price_approximate": record["_price_approximate"],
+            "price_source": built.price_source,
+            "price_approximate": built.price_approximate,
             "distance_since_last": result.get("last_distance"),
             "consumption_last": result.get("last_consumption"),
         }
@@ -464,7 +489,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             record["volume"],
             record["total_cost"],
             record["price"],
-            record["_price_source"],
+            built.price_source,
         )
         return response
 
@@ -488,17 +513,21 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             runtime = rt
             break
 
+        # 按生效时间排序后再逐条写入：缺省日期的条目按"当前时间"参与排序，
+        # 否则空日期会排到最前，导致时间-里程校验用错邻居。
+        now = dt_util.now()
         records = sorted(
             call.data[ATTR_RECORDS],
-            key=lambda r: str(r.get(ATTR_DATE) or ""),
+            key=lambda r: _import_sort_key(r, now),
         )
         imported = 0
         rejected: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
         for item in records:
-            record = await _async_build_record(
+            built = await _async_build_record(
                 call.hass, dict(item), vehicle_info, runtime
             )
+            record = built.record
             # 【必须修正才能算】逐行校验，冲突行拒绝并报告原因（其余行正常导入）
             try:
                 _validate_segment_order(
@@ -517,7 +546,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     ATTR_VOLUME: record["volume"],
                     ATTR_TOTAL_COST: record["total_cost"],
                     ATTR_PRICE: record["price"],
-                    "price_source": record["_price_source"],
+                    "price_source": built.price_source,
                 }
             )
 
@@ -662,9 +691,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         vehicle_info = store.get_vehicle(vehicle)
         runtime = next(iter(_get_runtime_datas(call.hass)), None)
 
-        new_record = await _async_build_record(
+        new_built = await _async_build_record(
             call.hass, merged, vehicle_info, runtime
         )
+        new_record = new_built.record
         # 【必须修正才能算】编辑后的记录与其前后邻居区间校验
         # （排除原记录本身；其余既有问题不阻止本次修正）
         _validate_segment_order(
@@ -711,6 +741,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 "location": data.display_name,
                 "current_update_time": data.update_time,
                 "period_count": len(history),
+                # 数据字段名 → 中文标签（periods[].prices 的 key 用字段名）
+                "labels": dict(OIL_TYPE_LABELS),
                 "periods": history,
             }
         raise HomeAssistantError("没有已加载的油价实例")

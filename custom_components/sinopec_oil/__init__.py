@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .api import SinopecOilApiClient
 from .const import (
@@ -22,12 +23,14 @@ from .const import (
     DEFAULT_PROVINCE,
     DEFAULT_SCAN_INTERVAL_MINUTES,
     DOMAIN,
+    SIGNAL_VEHICLE_ADDED,
 )
 from .coordinator import (
     RefuelStatsCoordinator,
     SinopecOilPriceCoordinator,
     SinopecOilRuntimeData,
 )
+from .form import FORM_STATE_KEY, release_form_platforms
 from .services import async_setup_services, async_unload_services
 from .store import RefuelStore
 
@@ -94,12 +97,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             fuel_type=pending_vehicle.get("fuel_type") or "92",
         )
         if created:
-            from homeassistant.helpers.dispatcher import (
-                async_dispatcher_send,
-            )
-
-            from .const import SIGNAL_VEHICLE_ADDED
-
             async_dispatcher_send(
                 hass, SIGNAL_VEHICLE_ADDED, pending_vehicle["name"]
             )
@@ -129,16 +126,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if isinstance(runtime, SinopecOilRuntimeData):
         await runtime.price_coordinator.client.async_close()
 
-    # 若没有其他已加载实例，注销服务并清理共享存储引用
     remaining = [
         e
         for e in hass.config_entries.async_entries(DOMAIN)
-        if e.entry_id != entry.entry_id
+        if e.entry_id != entry.entry_id and e.state is ConfigEntryState.LOADED
     ]
+
+    # 「加油填表」实体跨实例单例，随所有者卸载而消失
+    form_orphaned = release_form_platforms(hass, entry.entry_id)
+
     if not remaining:
+        # 没有其他已加载实例：注销服务并清理共享存储引用
         async_unload_services(hass)
         domain_data.pop("store", None)
-        domain_data.pop("form_created", None)
-        domain_data.pop("form_state", None)
+        domain_data.pop(FORM_STATE_KEY, None)
+    elif form_orphaned:
+        # 让剩余实例重载以接管填表实体
+        hass.async_create_task(
+            hass.config_entries.async_reload(remaining[0].entry_id)
+        )
 
     return True

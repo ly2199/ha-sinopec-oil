@@ -16,6 +16,8 @@ from homeassistant.util import dt as dt_util
 from .const import DOMAIN, MANUFACTURER
 
 FORM_STATE_KEY = "form_state"
+FORM_PLATFORMS_KEY = "form_platforms"
+FORM_OWNER_KEY = "form_owner"
 
 # 常用油品选项（"自动"= 使用车辆默认油品）
 FUEL_OPTIONS: list[str] = [
@@ -65,6 +67,36 @@ def get_form_state(hass: HomeAssistant) -> FormState:
         state = FormState()
         domain_data[FORM_STATE_KEY] = state
     return state
+
+
+def claim_form_platform(
+    hass: HomeAssistant, entry_id: str, platform: str
+) -> bool:
+    """Claim the right to create one platform's form entities.
+
+    填表是跨配置项的单例（共享 FormState 与「加油填表」设备），每个平台
+    只应创建一次。返回 False 表示该平台已由其他配置项创建，本次跳过。
+    """
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    claimed: set[str] = domain_data.setdefault(FORM_PLATFORMS_KEY, set())
+    if platform in claimed:
+        return False
+    claimed.add(platform)
+    domain_data[FORM_OWNER_KEY] = entry_id
+    return True
+
+
+def release_form_platforms(hass: HomeAssistant, entry_id: str) -> bool:
+    """Drop form ownership when the owning entry unloads.
+
+    返回 True 表示卸载的正是表单所有者，调用方需让其他实例接管重建。
+    """
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if domain_data.get(FORM_OWNER_KEY) != entry_id:
+        return False
+    domain_data.pop(FORM_OWNER_KEY, None)
+    domain_data.pop(FORM_PLATFORMS_KEY, None)
+    return True
 
 
 def form_device() -> DeviceInfo:
