@@ -479,7 +479,7 @@ class SinopecOilOptionsFlow(OptionsFlow):
             }
         )
         return self.async_show_form(
-            step_id="edit_vehicle", data_schema=schema
+            step_id="edit_vehicle_select", data_schema=schema
         )
 
     async def async_step_remove_vehicle(
@@ -612,5 +612,5 @@ class SinopecOilOptionsFlow(OptionsFlow):
             }
         )
         return self.async_show_form(
-            step_id="manage_records", data_schema=schema
+            step_id="manage_records_select", data_schema=schema
         )

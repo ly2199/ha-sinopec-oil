@@ -44,9 +44,12 @@ class FormState:
     when: datetime = field(default_factory=dt_util.now)
     note: str = ""
 
-    def reset(self, now: datetime) -> None:
-        """Clear inputs after a successful submission (keep the vehicle)."""
-        self.odometer = None
+    def reset(self, now: datetime, odometer: float | None = None) -> None:
+        """Clear inputs after a successful submission (keep the vehicle).
+
+        `odometer` 为提交后预填的下一箱基线里程（当前读数）。
+        """
+        self.odometer = odometer
         self.volume = None
         self.total_cost = None
         self.fuel = "自动"
@@ -77,16 +80,13 @@ def form_device() -> DeviceInfo:
 def build_service_data(state: FormState) -> dict[str, Any] | None:
     """Assemble record_refuel service data from the form state.
 
-    返回 None 表示缺少必填信息（车辆为空，或里程/量/费全空）。
+    返回 None 表示缺少必填信息（车辆为空，或加油量/费用均未填写；
+    里程表读数可选——表单会自动预填当前读数，服务端也支持沿用上次）。
     """
     vehicle = (state.vehicle or "").strip()
     if not vehicle:
         return None
-    if (
-        state.odometer is None
-        and state.volume is None
-        and state.total_cost is None
-    ):
+    if state.volume is None and state.total_cost is None:
         return None
 
     data: dict[str, Any] = {"vehicle": vehicle}

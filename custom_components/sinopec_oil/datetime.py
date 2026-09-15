@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from homeassistant.components.datetime import DateTimeEntity
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
 )

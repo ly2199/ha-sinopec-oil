@@ -313,6 +313,14 @@ async def _async_build_record(
             )
 
     odometer = data.get(ATTR_ODOMETER)
+    if odometer is None and hass is not None:
+        # 未填里程时沿用上次读数（或初始里程），保证里程链完整可算油耗
+        try:
+            odometer = _get_store(hass).get_current_odometer(
+                str(data.get(ATTR_VEHICLE, "")).strip()
+            )
+        except Exception:  # noqa: BLE001 - 兜底，里程补全失败不阻断记录
+            odometer = None
 
     return {
         "date": when.isoformat(timespec="seconds"),

@@ -70,6 +70,13 @@
           "fuel_type": "Default fuel type (92/95/98/0# etc.)"
         }
       },
+      "edit_vehicle_select": {
+        "title": "Select vehicle to edit",
+        "description": "Pick a vehicle to modify its initial odometer and default fuel type.",
+        "data": {
+          "vehicle": "Select vehicle"
+        }
+      },
       "edit_vehicle": {
         "title": "Edit vehicle",
         "description": "Editing: {vehicle}",
@@ -91,6 +98,13 @@
         "description": "Clear all refuel records of the vehicle (vehicle is kept); statistics will be recalculated.",
         "data": {
           "vehicle": "Select the vehicle to clear"
+        }
+      },
+      "manage_records_select": {
+        "title": "Manage refuel records",
+        "description": "Pick a vehicle to list all of its refuel records; you can then delete single records.",
+        "data": {
+          "vehicle": "Select vehicle"
         }
       },
       "manage_records": {

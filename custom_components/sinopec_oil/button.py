@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.button import ButtonEntity
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
@@ -73,9 +73,11 @@ class RefuelSubmitButton(CoordinatorEntity, ButtonEntity):
         state = get_form_state(self.hass)
         store = self._runtime.store
 
-        # 只有一辆车时自动补全（不依赖前端是否渲染过下拉）
+        # 只有一辆车时自动补全并预填里程（不覆盖用户已填的值）
         if not state.vehicle and len(store.vehicles) == 1:
             state.vehicle = next(iter(store.vehicles))
+            if state.odometer is None:
+                state.odometer = store.get_current_odometer(state.vehicle)
 
         data = build_service_data(state)
         if not data or (state.vehicle or "") not in store.vehicles:
@@ -83,11 +85,11 @@ class RefuelSubmitButton(CoordinatorEntity, ButtonEntity):
                 await self._notify(
                     "⛔ 加油填表", "还没有车辆。请先在集成选项中添加车辆。"
                 )
-            elif state.odometer is None and state.volume is None and state.total_cost is None:
-                await self._notify(
-                    "⛔ 加油填表",
-                    "请至少填写里程表读数，或加油量/费用之一（都填则自动算单价）。",
-                )
+            elif state.volume is None and state.total_cost is None:
+                hint = "请至少填写加油量或费用之一（都填则自动算单价）。"
+                if state.odometer is not None:
+                    hint += "里程表读数已自动带出，无需重复填写。"
+                await self._notify("⛔ 加油填表", hint)
             else:
                 await self._notify(
                     "⛔ 加油填表",
@@ -134,8 +136,11 @@ class RefuelSubmitButton(CoordinatorEntity, ButtonEntity):
                 )
         await self._notify("⛽ 加油记录", "\n".join(lines))
 
-        # 重置表单（保留车辆选择）
-        state.reset(dt_util.now())
+        # 重置表单（保留车辆选择；里程预填该车当前读数，作为下一箱基线）
+        state.reset(
+            dt_util.now(),
+            odometer=store.get_current_odometer(state.vehicle),
+        )
         async_dispatcher_send(self.hass, SIGNAL_FORM_SUBMITTED)
 
     async def _notify(self, title: str, message: str) -> None:

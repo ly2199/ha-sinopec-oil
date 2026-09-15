@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from homeassistant.components.select import SelectEntity
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
@@ -61,14 +61,21 @@ class _FormSelectBase(CoordinatorEntity, SelectEntity):
 
 
 class VehicleSelect(_FormSelectBase):
-    """加油车辆（选项来自已配置车辆，动态更新）。"""
+    """加油车辆（选项来自已配置车辆，动态更新）。
+
+    切换车辆时自动预填该车的当前里程表读数
+    （最后一条有里程的记录，无记录时回退初始里程）。
+    """
 
     _attr_name = "车辆"
     _attr_icon = "mdi:car"
     _attr_unique_id = "refuel_form_vehicle"
 
     def _apply(self, option: str) -> None:
-        get_form_state(self.hass).vehicle = option
+        state = get_form_state(self.hass)
+        state.vehicle = option
+        # 预填当前里程，避免每次手动输入
+        state.odometer = self._runtime.store.get_current_odometer(option)
 
     @property
     def options(self) -> list[str]:
@@ -83,7 +90,7 @@ class VehicleSelect(_FormSelectBase):
         if state.vehicle in vehicles:
             return state.vehicle
         if len(vehicles) == 1:
-            state.vehicle = vehicles[0]
+            self._apply(vehicles[0])  # 选中并预填里程
             return vehicles[0]
         return None
 

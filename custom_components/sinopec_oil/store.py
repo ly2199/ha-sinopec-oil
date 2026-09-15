@@ -62,6 +62,10 @@ def compute_stats(
         "last_record_date": None,
     }
     if not records:
+        # 无记录：里程表回退到配置的初始里程（传感器不再显示"未知"）
+        if initial_odometer is not None:
+            stats["odometer"] = initial_odometer
+            stats["total_distance"] = 0.0
         return stats
 
     sorted_records = sorted(records, key=lambda r: str(r.get("date", "")))
@@ -159,6 +163,21 @@ class RefuelStore:
         if not info:
             return None
         return {k: v for k, v in info.items() if k != "records"}
+
+    def get_current_odometer(self, vehicle: str) -> float | None:
+        """当前里程表读数：最近一条有里程的记录，否则回退初始里程。
+
+        供表单预填与服务端"沿用上次读数"使用。
+        """
+        info = self.vehicles.get(vehicle) or {}
+        records = sorted(
+            info.get("records", []), key=lambda r: str(r.get("date", ""))
+        )
+        for rec in reversed(records):
+            odo = _to_float(rec.get("odometer"))
+            if odo is not None:
+                return odo
+        return _to_float(info.get("initial_odometer"))
 
     def get_stats(self, vehicle: str) -> dict[str, Any]:
         """Return computed statistics for one vehicle."""

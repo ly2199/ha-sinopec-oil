@@ -5,10 +5,12 @@ from homeassistant.components.number import (
     NumberEntity,
     NumberMode,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .button import SIGNAL_FORM_SUBMITTED
 from .coordinator import SinopecOilRuntimeData
 from .form import form_device, get_form_state
 from .const import UNIT_KM, UNIT_LITER, UNIT_YUAN
@@ -47,6 +49,19 @@ class _FormNumberBase(CoordinatorEntity, NumberEntity):
         self.hass = hass
         self._runtime = runtime
         self._attr_device_info = form_device()
+
+    async def async_added_to_hass(self) -> None:
+        """Refresh display when the form is submitted/reset."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, SIGNAL_FORM_SUBMITTED, self._refresh
+            )
+        )
+
+    @callback
+    def _refresh(self, *_args) -> None:
+        self.async_write_ha_state()
 
     def _apply(self, value: float) -> None:
         """Apply a value to the form state (implemented by subclasses)."""
