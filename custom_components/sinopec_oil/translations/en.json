@@ -1,0 +1,46 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Sinopec Oil Price",
+        "description": "Select the default province/region for oil price lookup (can be changed later in integration options).",
+        "data": {
+          "province": "Oil price location (province / municipality / region)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Sinopec oil price website. Try again later.",
+      "invalid_data": "The oil price website returned invalid data."
+    },
+    "abort": {
+      "already_configured": "This province is already configured. Modify the existing entry instead."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Sinopec Oil Price options",
+        "description": "Change the oil price location or refresh interval.",
+        "data": {
+          "province": "Oil price location (province / municipality / region)",
+          "scan_interval": "Oil price refresh interval (minutes)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Sinopec oil price website. Try again later.",
+      "invalid_data": "The oil price website returned invalid data."
+    },
+    "abort": {
+      "province_in_use": "This province is already used by another entry."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "oil_updated": {
+        "name": "Oil price updated at"
+      }
+    }
+  }
+}

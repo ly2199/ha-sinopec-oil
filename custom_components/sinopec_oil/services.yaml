@@ -1,0 +1,95 @@
+record_refuel:
+  name: 记录加油
+  description: 记录一次加油（加油量、里程表读数、费用等），自动计算油耗与费用统计。
+  fields:
+    vehicle:
+      name: 车辆
+      description: 车辆名称/标识，用于区分多辆车（相同名称视为同一辆车）。
+      required: true
+      example: 我的 car
+      selector:
+        text:
+    odometer:
+      name: 里程表读数
+      description: 加油时的总里程表读数（公里）。
+      required: true
+      example: 12345
+      selector:
+        number:
+          min: 0
+          max: 10000000
+          step: 0.1
+          unit_of_measurement: km
+          mode: box
+    volume:
+      name: 加油量
+      description: 本次加注的燃油量（升）。
+      required: true
+      example: 40.5
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 0.01
+          unit_of_measurement: L
+          mode: box
+    total_cost:
+      name: 加油总费用
+      description: 本次加油实际支付的金额（元）。与"单价"至少填写一项；两者都填时以总费用为准。
+      required: false
+      example: 350.0
+      selector:
+        number:
+          min: 0
+          max: 100000
+          step: 0.01
+          unit_of_measurement: 元
+          mode: box
+    price:
+      name: 油品单价
+      description: 每升单价（元/L）。未填总费用时用于计算费用；不填则自动引用实时油价。
+      required: false
+      example: 8.29
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.01
+          unit_of_measurement: 元/L
+          mode: box
+    fuel_type:
+      name: 油品类型
+      description: 油品类型，例如 92、95、98、0#。
+      required: false
+      example: "92"
+      selector:
+        text:
+    date:
+      name: 加油时间
+      description: 加油时间，默认为当前时间。
+      required: false
+      selector:
+        datetime:
+    note:
+      name: 备注
+      description: 备注信息（油站、地点等）。
+      required: false
+      selector:
+        text:
+          multiline: true
+
+clear_vehicle_data:
+  name: 清除车辆数据
+  description: 删除某辆车的全部加油记录与统计数据。
+  fields:
+    vehicle:
+      name: 车辆
+      description: 要清除数据的车辆名称/标识。
+      required: true
+      example: 我的 car
+      selector:
+        text:
+
+refresh_oil_price:
+  name: 刷新油价
+  description: 立即从中石化网站刷新所有已配置省份的油价数据。

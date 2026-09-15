@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 编辑器 / 工具
+.idea/
+.vscode/
+.qoder/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log

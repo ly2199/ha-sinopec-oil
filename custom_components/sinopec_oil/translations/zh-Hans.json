@@ -1,0 +1,46 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "中石化油价",
+        "description": "选择油价查询的默认省份/地区（后续可在集成选项中修改）。",
+        "data": {
+          "province": "油价查询位置（省份/直辖市/自治区）"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "连接中石化油价网站失败，请稍后重试。",
+      "invalid_data": "油价网站返回了无效数据。"
+    },
+    "abort": {
+      "already_configured": "该省份已配置过，请在已有实例中修改。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "中石化油价选项",
+        "description": "修改油价查询位置或刷新频率。",
+        "data": {
+          "province": "油价查询位置（省份/直辖市/自治区）",
+          "scan_interval": "油价刷新间隔（分钟）"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "连接中石化油价网站失败，请稍后重试。",
+      "invalid_data": "油价网站返回了无效数据。"
+    },
+    "abort": {
+      "province_in_use": "该省份已被另一个实例使用。"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "oil_updated": {
+        "name": "油价更新时间"
+      }
+    }
+  }
+}
