@@ -1,6 +1,7 @@
-"""Persistent storage for refuel records and fuel consumption statistics."""
+"""Persistent storage for vehicles, refuel records and statistics."""
 from __future__ import annotations
 
+from datetime import date as dt_date, datetime
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -12,21 +13,47 @@ STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.refuel_records"
 
 
-def compute_stats(records: list[dict[str, Any]]) -> dict[str, Any]:
+def _to_float(value: Any) -> float | None:
+    """Safely convert a value to float."""
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_date(value: Any) -> dt_date | None:
+    """Parse an ISO datetime/date string to date."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)[:19]).date()
+    except ValueError:
+        return None
+
+
+def compute_stats(
+    records: list[dict[str, Any]],
+    initial_odometer: float | None = None,
+) -> dict[str, Any]:
     """Compute statistics for a vehicle from its refuel records.
 
     油耗计算逻辑（假设每次都加满）：
     - 相邻两次加油的里程差 = 该区间行驶里程
     - 该区间油耗 = 本次加油量 / 区间里程 * 100（L/100km）
-    - 累计平均油耗 = (首条记录之外的所有加油量之和) / 总里程 * 100
-      （首箱油对应的是首条记录之前的消耗，无法统计，故不计入）
+    - 累计平均油耗 = (首条记录之外的所有加油量之和) / 记录期总里程 * 100
+      （首箱油对应的是开始记录之前的消耗，无法统计，故不计入）
+    - 累计行驶里程：若配置了初始里程，则为 最新里程-初始里程；
+      否则为相邻记录里程差之和。
     """
     stats: dict[str, Any] = {
         "refuel_count": len(records),
         "total_volume": 0.0,
         "total_cost": 0.0,
         "odometer": None,
-        "total_distance": 0.0,
+        "total_distance": None,
+        "record_distance": 0.0,
         "last_distance": None,
         "last_consumption": None,
         "avg_consumption": None,
@@ -37,14 +64,15 @@ def compute_stats(records: list[dict[str, Any]]) -> dict[str, Any]:
     if not records:
         return stats
 
-    sorted_records = sorted(records, key=lambda r: r.get("date") or "")
+    sorted_records = sorted(records, key=lambda r: str(r.get("date", "")))
+
     total_volume = 0.0
     total_cost = 0.0
-    total_distance = 0.0
-    consumption_volumes = 0.0  # 可与里程对应起来的加油量（第 2 条起）
-    last_distance: float | None = None
-    last_consumption: float | None = None
-    prev: dict[str, Any] | None = None
+    consumption_volumes = 0.0
+    record_distance = 0.0
+    last_distance = None
+    last_consumption = None
+    prev = None
 
     for rec in sorted_records:
         odometer = _to_float(rec.get("odometer"))
@@ -58,35 +86,41 @@ def compute_stats(records: list[dict[str, Any]]) -> dict[str, Any]:
             if prev_odometer is not None:
                 distance = odometer - prev_odometer
                 if distance > 0:
-                    total_distance += distance
-                    last_distance = distance
+                    record_distance += distance
+                    last_distance = round(distance, 1)
                     last_consumption = round(volume / distance * 100, 2)
                     consumption_volumes += volume
         prev = rec
 
-    odometer_last = _to_float(sorted_records[-1].get("odometer"))
+    last_odometer = _to_float(sorted_records[-1].get("odometer"))
+
+    # 累计行驶里程：优先使用初始里程基准
+    if last_odometer is not None and initial_odometer is not None:
+        total_distance = max(last_odometer - initial_odometer, 0.0)
+    elif last_odometer is not None and last_distance is not None:
+        # 无初始里程：最后一段里程可视为近似（最后记录里程 - 上次记录里程之和）
+        total_distance = record_distance
+    else:
+        total_distance = None
+
+    avg_consumption = None
+    if consumption_volumes > 0 and record_distance > 0:
+        avg_consumption = round(consumption_volumes / record_distance * 100, 2)
 
     stats.update(
         {
             "total_volume": round(total_volume, 2),
             "total_cost": round(total_cost, 2),
-            "odometer": odometer_last,
-            "total_distance": round(total_distance, 1),
-            "last_distance": round(last_distance, 1) if last_distance else None,
+            "odometer": last_odometer,
+            "total_distance": round(total_distance, 1) if total_distance is not None else None,
+            "record_distance": round(record_distance, 1),
+            "last_distance": last_distance,
             "last_consumption": last_consumption,
-            "avg_consumption": (
-                round(consumption_volumes / total_distance * 100, 2)
-                if total_distance > 0 and consumption_volumes > 0
-                else None
-            ),
-            "avg_price": (
-                round(total_cost / total_volume, 2)
-                if total_volume > 0
-                else None
-            ),
+            "avg_consumption": avg_consumption,
+            "avg_price": round(total_cost / total_volume, 2) if total_volume > 0 else None,
             "per_km_cost": (
                 round(total_cost / total_distance, 3)
-                if total_distance > 0
+                if total_cost > 0 and total_distance
                 else None
             ),
             "last_record_date": sorted_records[-1].get("date"),
@@ -95,44 +129,20 @@ def compute_stats(records: list[dict[str, Any]]) -> dict[str, Any]:
     return stats
 
 
-def _to_float(value: Any) -> float | None:
-    """Convert a value to float safely."""
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 class RefuelStore:
-    """Store refuel records persistently.
-
-    数据结构：
-    {
-      "vehicles": {
-        "<vehicle>": {
-          "records": [
-            {"date": "...", "odometer": ..., "volume": ..., "total_cost": ...,
-             "price": ..., "fuel_type": "92", "note": ""}
-          ]
-        }
-      }
-    }
-    """
+    """Store vehicles and their refuel records."""
 
     def __init__(self, hass: HomeAssistant) -> None:
-        """Initialize the store."""
+        """Initialize the storage handler."""
         self._hass = hass
-        self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self._data: dict[str, Any] = {"vehicles": {}}
         self._loaded = False
 
     async def async_load(self) -> None:
         """Load data from disk."""
-        if (data := await self._store.async_load()) is not None:
-            self._data = data
-        self._data.setdefault("vehicles", {})
+        raw = await self._store.async_load() or {}
+        self._data = {"vehicles": raw.get("vehicles", {})}
         self._loaded = True
 
     @property
@@ -140,13 +150,81 @@ class RefuelStore:
         """Return all vehicles and their records."""
         return self._data.get("vehicles", {})
 
+    # ------------------------------------------------------------------
+    # 车辆管理
+    # ------------------------------------------------------------------
+    def get_vehicle(self, vehicle: str) -> dict[str, Any] | None:
+        """Return one vehicle's info (without records)."""
+        info = self.vehicles.get(vehicle)
+        if not info:
+            return None
+        return {k: v for k, v in info.items() if k != "records"}
+
+    def get_stats(self, vehicle: str) -> dict[str, Any]:
+        """Return computed statistics for one vehicle."""
+        info = self.vehicles.get(vehicle) or {}
+        return compute_stats(
+            info.get("records", []),
+            initial_odometer=_to_float(info.get("initial_odometer")),
+        )
+
+    async def async_add_vehicle(
+        self,
+        vehicle: str,
+        initial_odometer: float | None = None,
+        fuel_type: str | None = None,
+    ) -> bool:
+        """Add a vehicle. Return True if created, False if already exists."""
+        if vehicle in self.vehicles:
+            return False
+        self.vehicles[vehicle] = {
+            "name": vehicle,
+            "initial_odometer": initial_odometer,
+            "default_fuel_type": fuel_type,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "records": [],
+        }
+        await self._async_save()
+        return True
+
+    async def async_update_vehicle(
+        self,
+        vehicle: str,
+        initial_odometer: float | None = None,
+        fuel_type: str | None = None,
+    ) -> bool:
+        """Update vehicle settings. Return False if vehicle not found."""
+        info = self.vehicles.get(vehicle)
+        if info is None:
+            return False
+        if initial_odometer is not None:
+            info["initial_odometer"] = initial_odometer
+        if fuel_type is not None:
+            info["default_fuel_type"] = fuel_type
+        await self._async_save()
+        return True
+
+    async def async_remove_vehicle(self, vehicle: str) -> bool:
+        """Remove a vehicle and all its records. Return True if it existed."""
+        if vehicle not in self.vehicles:
+            return False
+        self.vehicles.pop(vehicle)
+        await self._async_save()
+        return True
+
+    # ------------------------------------------------------------------
+    # 加油记录
+    # ------------------------------------------------------------------
     def get_records(self, vehicle: str) -> list[dict[str, Any]]:
         """Return records for one vehicle."""
         return list(self.vehicles.get(vehicle, {}).get("records", []))
 
-    def get_stats(self, vehicle: str) -> dict[str, Any]:
-        """Return computed statistics for one vehicle."""
-        return compute_stats(self.get_records(vehicle))
+    def get_last_record(self, vehicle: str) -> dict[str, Any] | None:
+        """Return the latest record of a vehicle."""
+        records = self.get_records(vehicle)
+        if not records:
+            return None
+        return sorted(records, key=lambda r: str(r.get("date", "")))[-1]
 
     async def async_add_record(
         self, vehicle: str, record: dict[str, Any]
@@ -154,18 +232,21 @@ class RefuelStore:
         """Add a refuel record and return the post-add statistics."""
         is_new_vehicle = vehicle not in self.vehicles
         vehicle_data = self.vehicles.setdefault(vehicle, {"records": []})
-        vehicle_data["records"].append(record)
+        vehicle_data.setdefault("records", []).append(record)
         await self._async_save()
         stats = self.get_stats(vehicle)
 
         last_distance = None
         last_consumption = None
-        records = sorted(vehicle_data["records"], key=lambda r: r.get("date") or "")
+        records = vehicle_data.get("records", [])
         if len(records) >= 2:
-            prev_odometer = _to_float(records[-2].get("odometer"))
-            odometer = _to_float(records[-1].get("odometer"))
-            volume = _to_float(records[-1].get("volume")) or 0.0
-            if prev_odometer is not None and odometer is not None:
+            odometer = _to_float(record.get("odometer"))
+            volume = _to_float(record.get("volume")) or 0.0
+            prev = sorted(
+                records, key=lambda r: str(r.get("date", ""))
+            )[-2]
+            prev_odometer = _to_float(prev.get("odometer"))
+            if odometer is not None and prev_odometer is not None:
                 distance = odometer - prev_odometer
                 if distance > 0:
                     last_distance = round(distance, 1)
@@ -183,7 +264,7 @@ class RefuelStore:
         """Remove all records of a vehicle. Return True if it existed."""
         if vehicle not in self.vehicles:
             return False
-        self.vehicles.pop(vehicle)
+        self.vehicles[vehicle]["records"] = []
         await self._async_save()
         return True
 

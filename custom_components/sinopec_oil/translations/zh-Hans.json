@@ -3,9 +3,25 @@
     "step": {
       "user": {
         "title": "中石化油价",
-        "description": "选择油价查询的默认省份/地区（后续可在集成选项中修改）。",
+        "description": "选择油价查询的默认省份/地区（部分省份将进入价区选择）。",
         "data": {
           "province": "油价查询位置（省份/直辖市/自治区）"
+        }
+      },
+      "area": {
+        "title": "选择价区",
+        "description": "该省份按价区发布油价，请选择你所在的价区。",
+        "data": {
+          "area": "价区"
+        }
+      },
+      "vehicle": {
+        "title": "添加第一辆车（可选）",
+        "description": "为 {province} 配置一辆车，开始记录加油与油耗。也可以跳过，稍后在选项中添加。",
+        "data": {
+          "vehicle": "车辆名称/标识",
+          "initial_odometer": "初始里程表读数（公里，可选）",
+          "fuel_type": "默认油品（92/95/98/0# 等）"
         }
       }
     },
@@ -20,16 +36,69 @@
   "options": {
     "step": {
       "init": {
-        "title": "中石化油价选项",
+        "title": "中石化油价管理",
+        "menu_options": {
+          "settings": "⚙️ 油价位置与刷新设置",
+          "add_vehicle": "🚗 添加车辆",
+          "edit_vehicle": "✏️ 编辑车辆（初始里程/默认油品）",
+          "remove_vehicle": "🗑️ 删除车辆（含全部记录）",
+          "clear_vehicle": "🧹 清空某辆车的加油记录",
+          "done": "✅ 完成"
+        }
+      },
+      "settings": {
+        "title": "油价位置与刷新设置",
         "description": "修改油价查询位置或刷新频率。",
         "data": {
           "province": "油价查询位置（省份/直辖市/自治区）",
           "scan_interval": "油价刷新间隔（分钟）"
         }
+      },
+      "area": {
+        "title": "选择价区",
+        "description": "该省份按价区发布油价，请选择你所在的价区。",
+        "data": {
+          "area": "价区"
+        }
+      },
+      "add_vehicle": {
+        "title": "添加车辆",
+        "data": {
+          "vehicle": "车辆名称/标识",
+          "initial_odometer": "初始里程表读数（公里，可选）",
+          "fuel_type": "默认油品（92/95/98/0# 等）"
+        }
+      },
+      "edit_vehicle": {
+        "title": "编辑车辆",
+        "description": "正在编辑：{vehicle}",
+        "data": {
+          "vehicle": "选择要编辑的车辆",
+          "initial_odometer": "初始里程表读数（公里）",
+          "fuel_type": "默认油品"
+        }
+      },
+      "remove_vehicle": {
+        "title": "删除车辆",
+        "description": "将删除该车辆及其全部加油记录，对应统计实体一并移除。",
+        "data": {
+          "vehicle": "选择要删除的车辆"
+        }
+      },
+      "clear_vehicle": {
+        "title": "清空加油记录",
+        "description": "清空该车辆的加油记录（保留车辆），统计将重新计算。",
+        "data": {
+          "vehicle": "选择要清空记录的车辆"
+        }
+      },
+      "done": {
+        "title": "完成"
       }
     },
     "error": {
       "cannot_connect": "连接中石化油价网站失败，请稍后重试。",
+      "vehicle_name_required": "请填写车辆名称。",
       "invalid_data": "油价网站返回了无效数据。"
     },
     "abort": {

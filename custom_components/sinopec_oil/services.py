@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date as dt_date, datetime
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.const import ATTR_DATE
 from homeassistant.core import (
     HomeAssistant,
     ServiceCall,
@@ -19,14 +18,23 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
+from .api import resolve_fuel_keys
 from .const import (
+    CONF_FUEL_TYPE,
+    CONF_INITIAL_ODOMETER,
+    CONF_VEHICLE,
     DOMAIN,
+    SERVICE_ADD_VEHICLE,
     SERVICE_CLEAR_VEHICLE,
+    SERVICE_IMPORT_RECORDS,
     SERVICE_RECORD_REFUEL,
     SERVICE_REFRESH_OIL_PRICE,
+    SERVICE_REMOVE_VEHICLE,
     SIGNAL_VEHICLE_ADDED,
+    SIGNAL_VEHICLE_REMOVED,
 )
 from .coordinator import SinopecOilRuntimeData
+from .store import _to_float
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -36,15 +44,17 @@ ATTR_VOLUME = "volume"
 ATTR_TOTAL_COST = "total_cost"
 ATTR_PRICE = "price"
 ATTR_FUEL_TYPE = "fuel_type"
+ATTR_DATE = "date"
 ATTR_NOTE = "note"
+ATTR_RECORDS = "records"
 
-RECORD_REFUEL_SCHEMA = vol.Schema(
+_RECORD_ITEM_SCHEMA = vol.Schema(
     {
-        vol.Required(ATTR_VEHICLE): cv.string,
-        vol.Required(ATTR_ODOMETER): vol.All(
+        vol.Optional(ATTR_DATE): cv.datetime,
+        vol.Optional(ATTR_ODOMETER): vol.All(
             vol.Coerce(float), vol.Range(min=0)
         ),
-        vol.Required(ATTR_VOLUME): vol.All(
+        vol.Optional(ATTR_VOLUME): vol.All(
             vol.Coerce(float), vol.Range(min=0.01)
         ),
         vol.Optional(ATTR_TOTAL_COST): vol.All(
@@ -53,132 +63,424 @@ RECORD_REFUEL_SCHEMA = vol.Schema(
         vol.Optional(ATTR_PRICE): vol.All(
             vol.Coerce(float), vol.Range(min=0)
         ),
-        vol.Optional(ATTR_FUEL_TYPE, default=""): cv.string,
-        vol.Optional(ATTR_DATE): cv.datetime,
-        vol.Optional(ATTR_NOTE, default=""): cv.string,
+        vol.Optional(ATTR_FUEL_TYPE): cv.string,
+        vol.Optional(ATTR_NOTE): cv.string,
     }
+)
+
+RECORD_REFUEL_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_VEHICLE): cv.string,
+        vol.Optional(ATTR_ODOMETER): vol.All(
+            vol.Coerce(float), vol.Range(min=0)
+        ),
+        vol.Optional(ATTR_VOLUME): vol.All(
+            vol.Coerce(float), vol.Range(min=0.01)
+        ),
+        vol.Optional(ATTR_TOTAL_COST): vol.All(
+            vol.Coerce(float), vol.Range(min=0)
+        ),
+        vol.Optional(ATTR_PRICE): vol.All(
+            vol.Coerce(float), vol.Range(min=0)
+        ),
+        vol.Optional(ATTR_FUEL_TYPE): cv.string,
+        vol.Optional(ATTR_DATE): cv.datetime,
+        vol.Optional(ATTR_NOTE): cv.string,
+    }
+)
+
+IMPORT_RECORDS_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_VEHICLE): cv.string,
+        vol.Required(ATTR_RECORDS): vol.All(
+            cv.ensure_list, [vol.All(dict, _RECORD_ITEM_SCHEMA)]
+        ),
+    }
+)
+
+ADD_VEHICLE_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_VEHICLE): cv.string,
+        vol.Optional(CONF_INITIAL_ODOMETER): vol.All(
+            vol.Coerce(float), vol.Range(min=0)
+        ),
+        vol.Optional(ATTR_FUEL_TYPE, default="92"): cv.string,
+    }
+)
+
+REMOVE_VEHICLE_SCHEMA = vol.Schema(
+    {vol.Required(ATTR_VEHICLE): cv.string}
 )
 
 CLEAR_VEHICLE_SCHEMA = vol.Schema(
-    {
-        vol.Required(ATTR_VEHICLE): cv.string,
-    }
+    {vol.Required(ATTR_VEHICLE): cv.string}
 )
 
 
-@callback
+def _get_store(hass: HomeAssistant):
+    """Return the shared refuel store."""
+    store = hass.data.get(DOMAIN, {}).get("store")
+    if store is None:
+        raise HomeAssistantError("集成尚未完成加载")
+    return store
+
+
 def _get_runtime_datas(hass: HomeAssistant) -> list[SinopecOilRuntimeData]:
     """Return runtime data of all loaded entries."""
-    domain_data = hass.data.get(DOMAIN, {})
     return [
-        value
-        for key, value in domain_data.items()
-        if isinstance(key, str)
-        and key != "store"
-        and isinstance(value, SinopecOilRuntimeData)
+        entry.runtime_data
+        for entry in hass.config_entries.async_entries(DOMAIN)
+        if hasattr(entry, "runtime_data")
+        and isinstance(
+            getattr(entry, "runtime_data", None), SinopecOilRuntimeData
+        )
     ]
 
 
+def _resolve_fuel_key(
+    vehicle_info: dict[str, Any] | None,
+    fuel_input: str | None,
+    available_keys: set[str],
+) -> tuple[str | None, str | None]:
+    """Resolve the fuel data key.
+
+    优先级：用户输入 > 车辆默认油品 > 当前价表中第一个可用油品。
+    返回 (data_key, fuel_type_display)。
+    """
+    candidates: list[tuple[str, ...]] = []
+    if fuel_input:
+        keys = resolve_fuel_keys(fuel_input)
+        if keys:
+            candidates.append(keys)
+    if vehicle_info and vehicle_info.get("default_fuel_type"):
+        keys = resolve_fuel_keys(str(vehicle_info["default_fuel_type"]))
+        if keys:
+            candidates.append(keys)
+
+    for keys in candidates:
+        for key in keys:
+            if key in available_keys:
+                return key, key
+    # 兜底：当前价表中第一个油品
+    for key in sorted(available_keys):
+        return key, key
+    return None, None
+
+
+async def _async_build_record(
+    hass: HomeAssistant,
+    data: dict[str, Any],
+    vehicle_info: dict[str, Any] | None,
+    runtime: SinopecOilRuntimeData | None,
+) -> dict[str, Any]:
+    """Build a refuel record with smart price/volume/cost calculation.
+
+    智能计算规则：
+    - 输入加油量 + 总费用 → 单价 = 费用/加油量（实际成交价）
+    - 只输入加油量 → 费用 = 加油量 × 基准油价（当日或历史）
+    - 只输入总费用 → 加油量 = 费用 / 基准油价
+    - 基准油价：加油日期为今天 → 当前缓存油价；
+      历史日期 → 自动查询中石化历史调价周期匹配当日油价。
+    """
+    volume = data.get(ATTR_VOLUME)
+    total_cost = data.get(ATTR_TOTAL_COST)
+    price_input = data.get(ATTR_PRICE)
+    fuel_input = data.get(ATTR_FUEL_TYPE)
+
+    when: datetime = data.get(ATTR_DATE) or dt_util.now()
+    when_date: dt_date = when.date()
+    today = dt_util.now().date()
+
+    price_value: float | None = None
+    price_source: str | None = None
+    price_approx = False
+    fuel_key: str | None = None
+
+    if total_cost is not None and volume is not None:
+        # 两者齐全，油价仅作展示
+        if price_input is not None:
+            price_value = float(price_input)
+            price_source = "手动输入"
+        else:
+            price_value = round(float(total_cost) / float(volume), 4)
+            price_source = "费用/加油量"
+        if runtime is not None and runtime.price_coordinator.data:
+            key, _ = _resolve_fuel_key(
+                vehicle_info, fuel_input, set(runtime.price_coordinator.data.prices)
+            )
+            fuel_key = key
+    else:
+        # 需要基准油价
+        ref_price = None
+        available: set[str] = set()
+        if runtime is not None and runtime.price_coordinator.data:
+            oil = runtime.price_coordinator.data
+            available = set(oil.prices)
+            key, _ = _resolve_fuel_key(
+                vehicle_info, fuel_input, available
+            )
+            fuel_key = key
+            if key is not None and when_date >= today:
+                ref_price = oil.prices.get(key)
+                price_source = f"当前油价（{oil.display_name}）"
+        if ref_price is None:
+            # 历史日期或当前缓存中没有：查询历史调价周期
+            keys = resolve_fuel_keys(fuel_input or "")
+            if not keys and vehicle_info and vehicle_info.get("default_fuel_type"):
+                keys = resolve_fuel_keys(
+                    str(vehicle_info["default_fuel_type"])
+                )
+            if not keys and runtime is not None and runtime.price_coordinator.data:
+                keys = tuple(runtime.price_coordinator.data.prices.keys())
+            if not keys:
+                raise HomeAssistantError(
+                    "无法确定油品类型：请填写 fuel_type（如 92、95、98、0）"
+                )
+            # 使用该省任一已加载实例的 client 查询历史
+            client = None
+            for rt in _get_runtime_datas(hass):
+                client = rt.price_coordinator.client
+                break
+            if client is None:
+                raise HomeAssistantError(
+                    "没有已加载的油价实例，无法查询历史油价"
+                )
+            resolved = await client.async_get_price_on(keys, when_date)
+            if resolved is None:
+                raise HomeAssistantError(
+                    f"无法在历史油价中找到 {when_date.isoformat()} 的价格，"
+                    "请手动填写 price（单价）"
+                )
+            ref_price, price_source, price_approx = resolved
+
+        if volume is not None:
+            total_cost = round(float(volume) * ref_price, 2)
+            price_value = round(ref_price, 2)
+        elif total_cost is not None:
+            volume = round(float(total_cost) / ref_price, 2)
+            price_value = round(ref_price, 2)
+        else:
+            raise HomeAssistantError(
+                "只填写单价时无法计算加油量/费用："
+                "请至少填写 volume（加油量）或 total_cost（总费用）之一"
+            )
+
+    odometer = data.get(ATTR_ODOMETER)
+
+    return {
+        "date": when.isoformat(timespec="seconds"),
+        "odometer": _to_float(odometer),
+        "volume": _to_float(volume),
+        "total_cost": _to_float(total_cost),
+        "price": price_value,
+        "fuel_type": fuel_input or "",
+        "fuel_key": fuel_key,
+        "note": data.get(ATTR_NOTE) or "",
+        "_price_source": price_source,
+        "_price_approximate": price_approx,
+    }
+
+
 async def async_setup_services(hass: HomeAssistant) -> None:
-    """Register services (only once)."""
+    """Register integration services (once)."""
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get("services_registered"):
         return
-
-    def _get_store(call: ServiceCall):
-        store = hass.data.get(DOMAIN, {}).get("store")
-        if store is None:
-            raise HomeAssistantError("加油记录存储未初始化")
-        return store
 
     async def async_handle_record_refuel(
         call: ServiceCall,
     ) -> ServiceResponse:
         """Handle the record_refuel service call."""
-        store = _get_store(call)
-        data = call.data
+        store = _get_store(call.hass)
+        data = dict(call.data)
 
-        vehicle = data[ATTR_VEHICLE].strip()
+        vehicle = str(data[ATTR_VEHICLE]).strip()
         if not vehicle:
             raise HomeAssistantError("vehicle（车辆）不能为空")
 
-        volume = float(data[ATTR_VOLUME])
-        total_cost = data.get(ATTR_TOTAL_COST)
-        price = data.get(ATTR_PRICE)
-
-        if total_cost is None and price is None:
-            raise HomeAssistantError(
-                "total_cost（加油费用）与 price（单价）至少填写一项；"
-                "都不填时可使用服务响应中的实时油价"
+        vehicle_info = store.get_vehicle(vehicle)
+        if vehicle_info is None:
+            # 车辆不存在时自动创建（初始里程取本次里程，默认油品取本次油品）
+            await store.async_add_vehicle(
+                vehicle,
+                initial_odometer=_to_float(data.get(ATTR_ODOMETER)),
+                fuel_type=data.get(ATTR_FUEL_TYPE) or "92",
             )
+            vehicle_info = store.get_vehicle(vehicle)
+            async_dispatcher_send(call.hass, SIGNAL_VEHICLE_ADDED, vehicle)
 
-        if total_cost is None:
-            total_cost = round(price * volume, 2)
-        if price is None:
-            price = round(total_cost / volume, 4) if volume else None
+        runtime = None
+        for rt in _get_runtime_datas(call.hass):
+            runtime = rt
+            break
 
-        when: datetime = data.get(ATTR_DATE) or dt_util.now()
-
-        record: dict[str, Any] = {
-            "date": when.isoformat(timespec="seconds"),
-            "odometer": float(data[ATTR_ODOMETER]),
-            "volume": volume,
-            "total_cost": float(total_cost),
-            "price": price,
-            "fuel_type": data.get(ATTR_FUEL_TYPE) or "",
-            "note": data.get(ATTR_NOTE) or "",
-        }
-
+        record = await _async_build_record(
+            call.hass, data, vehicle_info, runtime
+        )
         result = await store.async_add_record(vehicle, record)
 
-        # 触发统计实体刷新 & 通知新车辆
-        for runtime in _get_runtime_datas(hass):
-            hass.async_create_task(
-                runtime.refuel_coordinator.async_request_refresh()
+        for rt in _get_runtime_datas(call.hass):
+            call.hass.async_create_task(
+                rt.refuel_coordinator.async_request_refresh()
             )
-        if result.get("new_vehicle"):
-            async_dispatcher_send(hass, SIGNAL_VEHICLE_ADDED, vehicle)
 
+        response: dict[str, Any] = {
+            ATTR_VEHICLE: vehicle,
+            ATTR_DATE: record["date"],
+            ATTR_VOLUME: record["volume"],
+            ATTR_TOTAL_COST: record["total_cost"],
+            ATTR_PRICE: record["price"],
+            "price_source": record["_price_source"],
+            "price_approximate": record["_price_approximate"],
+            "distance_since_last": result.get("last_distance"),
+            "consumption_last": result.get("last_consumption"),
+        }
         _LOGGER.info(
-            "已记录加油：车辆=%s 里程=%.1f km 加油量=%.2f L 费用=%.2f 元",
+            "已记录加油：%s %sL / %s元 / %s元-L（油价来源：%s）",
             vehicle,
-            record["odometer"],
-            volume,
+            record["volume"],
             record["total_cost"],
+            record["price"],
+            record["_price_source"],
         )
-        return result
+        return response
+
+    async def async_handle_import_records(
+        call: ServiceCall,
+    ) -> ServiceResponse:
+        """Batch-import historical refuel records (smart calculation each)."""
+        store = _get_store(call.hass)
+        vehicle = str(call.data[ATTR_VEHICLE]).strip()
+        if not vehicle:
+            raise HomeAssistantError("vehicle（车辆）不能为空")
+
+        vehicle_info = store.get_vehicle(vehicle)
+        if vehicle_info is None:
+            await store.async_add_vehicle(vehicle)
+            vehicle_info = store.get_vehicle(vehicle)
+            async_dispatcher_send(call.hass, SIGNAL_VEHICLE_ADDED, vehicle)
+
+        runtime = None
+        for rt in _get_runtime_datas(call.hass):
+            runtime = rt
+            break
+
+        records = sorted(
+            call.data[ATTR_RECORDS],
+            key=lambda r: str(r.get(ATTR_DATE) or ""),
+        )
+        imported = 0
+        results: list[dict[str, Any]] = []
+        for item in records:
+            record = await _async_build_record(
+                call.hass, dict(item), vehicle_info, runtime
+            )
+            await store.async_add_record(vehicle, record)
+            imported += 1
+            results.append(
+                {
+                    ATTR_DATE: record["date"],
+                    ATTR_VOLUME: record["volume"],
+                    ATTR_TOTAL_COST: record["total_cost"],
+                    ATTR_PRICE: record["price"],
+                    "price_source": record["_price_source"],
+                }
+            )
+
+        for rt in _get_runtime_datas(call.hass):
+            call.hass.async_create_task(
+                rt.refuel_coordinator.async_request_refresh()
+            )
+        _LOGGER.info("批量导入加油记录：%s 共 %d 条", vehicle, imported)
+        return {"vehicle": vehicle, "imported": imported, "records": results}
+
+    async def async_handle_add_vehicle(
+        call: ServiceCall,
+    ) -> ServiceResponse:
+        """Add a vehicle."""
+        store = _get_store(call.hass)
+        vehicle = str(call.data[ATTR_VEHICLE]).strip()
+        if not vehicle:
+            raise HomeAssistantError("vehicle（车辆）不能为空")
+        created = await store.async_add_vehicle(
+            vehicle,
+            initial_odometer=_to_float(
+                call.data.get(CONF_INITIAL_ODOMETER)
+            ),
+            fuel_type=call.data.get(ATTR_FUEL_TYPE) or "92",
+        )
+        if created:
+            async_dispatcher_send(
+                call.hass, SIGNAL_VEHICLE_ADDED, vehicle
+            )
+        return {"vehicle": vehicle, "created": created}
+
+    async def async_handle_remove_vehicle(
+        call: ServiceCall,
+    ) -> ServiceResponse:
+        """Remove a vehicle."""
+        store = _get_store(call.hass)
+        vehicle = str(call.data[ATTR_VEHICLE]).strip()
+        removed = await store.async_remove_vehicle(vehicle)
+        if removed:
+            async_dispatcher_send(
+                call.hass, SIGNAL_VEHICLE_REMOVED, vehicle
+            )
+        return {"vehicle": vehicle, "removed": removed}
 
     async def async_handle_clear_vehicle(
         call: ServiceCall,
     ) -> ServiceResponse:
-        """Handle the clear_vehicle_data service call."""
-        store = _get_store(call)
+        """Clear records of a vehicle."""
+        store = _get_store(call.hass)
         vehicle = str(call.data[ATTR_VEHICLE]).strip()
-        existed = await store.async_clear_vehicle(vehicle)
-        if not existed:
-            raise HomeAssistantError(f"车辆 '{vehicle}' 不存在")
-        for runtime in _get_runtime_datas(hass):
-            hass.async_create_task(
-                runtime.refuel_coordinator.async_request_refresh()
-            )
-        _LOGGER.info("已清除车辆加油记录：%s", vehicle)
-        return {"vehicle": vehicle, "cleared": True}
+        cleared = await store.async_clear_vehicle(vehicle)
+        return {"vehicle": vehicle, "cleared": cleared}
 
     async def async_handle_refresh_oil_price(
         call: ServiceCall,
     ) -> ServiceResponse:
-        """Handle the refresh_oil_price service call."""
-        refreshed = 0
-        for runtime in _get_runtime_datas(hass):
-            await runtime.price_coordinator.async_request_refresh()
-            refreshed += 1
-        return {"refreshed_entries": refreshed}
+        """Refresh oil prices of all entries now."""
+        updated = []
+        for rt in _get_runtime_datas(call.hass):
+            await rt.price_coordinator.async_request_refresh()
+            oil = rt.price_coordinator.data
+            if oil is not None:
+                updated.append(
+                    {
+                        "location": oil.display_name,
+                        "updated_at": oil.update_time,
+                        "price_count": len(oil.prices),
+                    }
+                )
+        return {"entries": updated}
 
     hass.services.async_register(
         DOMAIN,
         SERVICE_RECORD_REFUEL,
         async_handle_record_refuel,
         schema=RECORD_REFUEL_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_IMPORT_RECORDS,
+        async_handle_import_records,
+        schema=IMPORT_RECORDS_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_ADD_VEHICLE,
+        async_handle_add_vehicle,
+        schema=ADD_VEHICLE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REMOVE_VEHICLE,
+        async_handle_remove_vehicle,
+        schema=REMOVE_VEHICLE_SCHEMA,
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
@@ -200,7 +502,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 @callback
 def async_unload_services(hass: HomeAssistant) -> None:
     """Remove services when the last entry is unloaded."""
-    hass.services.async_remove(DOMAIN, SERVICE_RECORD_REFUEL)
-    hass.services.async_remove(DOMAIN, SERVICE_CLEAR_VEHICLE)
-    hass.services.async_remove(DOMAIN, SERVICE_REFRESH_OIL_PRICE)
+    for service in (
+        SERVICE_RECORD_REFUEL,
+        SERVICE_IMPORT_RECORDS,
+        SERVICE_ADD_VEHICLE,
+        SERVICE_REMOVE_VEHICLE,
+        SERVICE_CLEAR_VEHICLE,
+        SERVICE_REFRESH_OIL_PRICE,
+    ):
+        hass.services.async_remove(DOMAIN, service)
     hass.data.setdefault(DOMAIN, {})["services_registered"] = False

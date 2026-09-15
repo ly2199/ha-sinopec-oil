@@ -1,7 +1,9 @@
 {
   "domain": "sinopec_oil",
   "name": "Sinopec Oil Price 中石化油价",
-  "codeowners": ["@ly2199"],
+  "codeowners": [
+    "@ly2199"
+  ],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/ly2199/ha-sinopec-oil",

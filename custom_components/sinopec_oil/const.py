@@ -8,10 +8,18 @@ MANUFACTURER: Final = "Sinopec / 中国石化"
 
 # --- 配置项 ---
 CONF_PROVINCE: Final = "province"
+CONF_AREA: Final = "area"  # 价区（一价区/二价区等）ID
 CONF_SCAN_INTERVAL: Final = "scan_interval"
 
-DEFAULT_PROVINCE: Final = "11"  # 默认省份：北京（行政区划代码前两位）
-DEFAULT_SCAN_INTERVAL_MINUTES: Final = 60  # 默认每 60 分钟刷新一次油价
+# 车辆配置
+CONF_VEHICLE: Final = "vehicle"
+CONF_VEHICLES: Final = "vehicles"
+CONF_INITIAL_ODOMETER: Final = "initial_odometer"
+CONF_FUEL_TYPE: Final = "fuel_type"
+
+DEFAULT_PROVINCE: Final = "11"  # 默认省份：北京
+DEFAULT_SCAN_INTERVAL_MINUTES: Final = 60
+DEFAULT_VEHICLE_NAME: Final = "我的车"
 
 # --- 单位 ---
 UNIT_YUAN_PER_LITER: Final = "元/L"
@@ -23,11 +31,15 @@ UNIT_YUAN_PER_KM: Final = "元/km"
 
 # --- 服务 ---
 SERVICE_RECORD_REFUEL: Final = "record_refuel"
+SERVICE_IMPORT_RECORDS: Final = "import_refuel_records"
+SERVICE_ADD_VEHICLE: Final = "add_vehicle"
+SERVICE_REMOVE_VEHICLE: Final = "remove_vehicle"
 SERVICE_CLEAR_VEHICLE: Final = "clear_vehicle_data"
 SERVICE_REFRESH_OIL_PRICE: Final = "refresh_oil_price"
 
 # --- 事件/信号 ---
 SIGNAL_VEHICLE_ADDED: Final = f"{DOMAIN}_vehicle_added"
+SIGNAL_VEHICLE_REMOVED: Final = f"{DOMAIN}_vehicle_removed"
 
 # --- 数据源 ---
 BASE_URL: Final = "https://cx.sinopecsales.com"
@@ -37,7 +49,7 @@ USER_AGENT: Final = (
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
 
-# --- 省份列表（来自中石化页面，provinceId 为行政区划代码前两位） ---
+# --- 省份列表 {provinceId: 名称} ---
 PROVINCES: Final[dict[str, str]] = {
     "11": "北京",
     "12": "天津",
@@ -95,4 +107,22 @@ OIL_TYPE_MAP: Final[dict[str, tuple[str, str]]] = {
     "LNG": ("LNG", "LNG天然气"),
     "CNG": ("CNG", "CNG天然气"),
     "L_CNG": ("L_CNG", "L-CNG天然气"),
+}
+
+# --- 常用油品别名 → 候选数据字段（按优先级） ---
+# 用于把用户输入的 "92"/"95"/"0#"/"柴油" 等映射到实际数据字段
+FUEL_TYPE_ALIASES: Final[dict[str, tuple[str, ...]]] = {
+    "89": ("GAS_89",),
+    "92": ("GAS_92", "AIPAO_GAS_92", "E92", "AIPAO_GAS_E92"),
+    "95": ("GAS_95", "AIPAO_GAS_95", "E95", "AIPAO_GAS_E95"),
+    "98": ("GAS_98", "AIPAO_GAS_98", "E98", "AIPAO_GAS_E98"),
+    "0": ("CHECHAI_0",),
+    "0号": ("CHECHAI_0",),
+    "柴油": ("CHECHAI_0",),
+    "-10": ("CHECHAI_10",),
+    "-20": ("CHAI_20",),
+    "-35": ("CHAI_35",),
+    "lng": ("LNG",),
+    "cng": ("CNG",),
+    "l-cng": ("L_CNG",),
 }

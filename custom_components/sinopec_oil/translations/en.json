@@ -3,9 +3,25 @@
     "step": {
       "user": {
         "title": "Sinopec Oil Price",
-        "description": "Select the default province/region for oil price lookup (can be changed later in integration options).",
+        "description": "Select the default province/region for oil price lookup (provinces with price areas continue to area selection).",
         "data": {
           "province": "Oil price location (province / municipality / region)"
+        }
+      },
+      "area": {
+        "title": "Select price area",
+        "description": "This province publishes prices per price area. Choose the one you are in.",
+        "data": {
+          "area": "Price area"
+        }
+      },
+      "vehicle": {
+        "title": "Add first vehicle (optional)",
+        "description": "Configure a vehicle for {province} to start logging refuels. You can skip and add later in options.",
+        "data": {
+          "vehicle": "Vehicle name / identifier",
+          "initial_odometer": "Initial odometer reading (km, optional)",
+          "fuel_type": "Default fuel type (92/95/98/0# etc.)"
         }
       }
     },
@@ -20,16 +36,69 @@
   "options": {
     "step": {
       "init": {
-        "title": "Sinopec Oil Price options",
+        "title": "Sinopec Oil Price management",
+        "menu_options": {
+          "settings": "⚙️ Location & refresh settings",
+          "add_vehicle": "🚗 Add vehicle",
+          "edit_vehicle": "✏️ Edit vehicle (initial odometer / default fuel)",
+          "remove_vehicle": "🗑️ Remove vehicle (with all records)",
+          "clear_vehicle": "🧹 Clear a vehicle's refuel records",
+          "done": "✅ Done"
+        }
+      },
+      "settings": {
+        "title": "Location & refresh settings",
         "description": "Change the oil price location or refresh interval.",
         "data": {
           "province": "Oil price location (province / municipality / region)",
           "scan_interval": "Oil price refresh interval (minutes)"
         }
+      },
+      "area": {
+        "title": "Select price area",
+        "description": "This province publishes prices per price area. Choose the one you are in.",
+        "data": {
+          "area": "Price area"
+        }
+      },
+      "add_vehicle": {
+        "title": "Add vehicle",
+        "data": {
+          "vehicle": "Vehicle name / identifier",
+          "initial_odometer": "Initial odometer reading (km, optional)",
+          "fuel_type": "Default fuel type (92/95/98/0# etc.)"
+        }
+      },
+      "edit_vehicle": {
+        "title": "Edit vehicle",
+        "description": "Editing: {vehicle}",
+        "data": {
+          "vehicle": "Select the vehicle to edit",
+          "initial_odometer": "Initial odometer reading (km)",
+          "fuel_type": "Default fuel type"
+        }
+      },
+      "remove_vehicle": {
+        "title": "Remove vehicle",
+        "description": "This will delete the vehicle with all its refuel records and statistics entities.",
+        "data": {
+          "vehicle": "Select the vehicle to remove"
+        }
+      },
+      "clear_vehicle": {
+        "title": "Clear refuel records",
+        "description": "Clear all refuel records of the vehicle (vehicle is kept); statistics will be recalculated.",
+        "data": {
+          "vehicle": "Select the vehicle to clear"
+        }
+      },
+      "done": {
+        "title": "Done"
       }
     },
     "error": {
       "cannot_connect": "Failed to connect to the Sinopec oil price website. Try again later.",
+      "vehicle_name_required": "Vehicle name is required.",
       "invalid_data": "The oil price website returned invalid data."
     },
     "abort": {

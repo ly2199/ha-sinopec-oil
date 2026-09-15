@@ -24,7 +24,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class SinopecOilPriceCoordinator(DataUpdateCoordinator[OilPriceData]):
-    """Coordinator that polls oil prices for one province."""
+    """Coordinator that polls oil prices for one province/area."""
 
     def __init__(
         self,
@@ -42,7 +42,7 @@ class SinopecOilPriceCoordinator(DataUpdateCoordinator[OilPriceData]):
         self.client = client
 
     async def _async_update_data(self) -> OilPriceData:
-        """Fetch oil prices."""
+        """Fetch the latest oil prices."""
         try:
             return await self.client.async_get_oil_prices()
         except SinopecOilApiClientError as err:

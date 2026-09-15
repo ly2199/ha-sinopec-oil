@@ -1,6 +1,9 @@
 record_refuel:
   name: 记录加油
-  description: 记录一次加油（加油量、里程表读数、费用等），自动计算油耗与费用统计。
+  description: >-
+    记录一次加油，自动按当日/历史油价智能计算加油量与费用，并更新油耗统计。
+    智能计价：量+费用 → 单价=费用/量；只填量 → 费用=量×基准油价；
+    只填费用 → 量=费用/基准油价（历史日期自动查询对应调价周期油价）。
   fields:
     vehicle:
       name: 车辆
@@ -11,8 +14,8 @@ record_refuel:
         text:
     odometer:
       name: 里程表读数
-      description: 加油时的总里程表读数（公里）。
-      required: true
+      description: 加油时的总里程表读数（公里）。用于里程与油耗统计，建议填写。
+      required: false
       example: 12345
       selector:
         number:
@@ -23,8 +26,8 @@ record_refuel:
           mode: box
     volume:
       name: 加油量
-      description: 本次加注的燃油量（升）。
-      required: true
+      description: 本次加注的燃油量（升）。未填时按费用与基准油价自动推算。
+      required: false
       example: 40.5
       selector:
         number:
@@ -35,7 +38,7 @@ record_refuel:
           mode: box
     total_cost:
       name: 加油总费用
-      description: 本次加油实际支付的金额（元）。与"单价"至少填写一项；两者都填时以总费用为准。
+      description: 本次加油实际支付的金额（元）。未填时按加油量与基准油价自动计算。
       required: false
       example: 350.0
       selector:
@@ -47,7 +50,7 @@ record_refuel:
           mode: box
     price:
       name: 油品单价
-      description: 每升单价（元/L）。未填总费用时用于计算费用；不填则自动引用实时油价。
+      description: 每升单价（元/L）。不填时自动引用当日（或历史日期的）油价。
       required: false
       example: 8.29
       selector:
@@ -59,14 +62,16 @@ record_refuel:
           mode: box
     fuel_type:
       name: 油品类型
-      description: 油品类型，例如 92、95、98、0#。
+      description: >-
+        油品类型，如 92、95、98、0#、-10、柴油、LNG；
+        不填时使用车辆默认油品，再退回当前价表第一个油品。
       required: false
       example: "92"
       selector:
         text:
     date:
       name: 加油时间
-      description: 加油时间，默认为当前时间。
+      description: 加油时间，默认为当前时间。历史日期会自动匹配当时的调价周期油价。
       required: false
       selector:
         datetime:
@@ -78,13 +83,84 @@ record_refuel:
         text:
           multiline: true
 
-clear_vehicle_data:
-  name: 清除车辆数据
-  description: 删除某辆车的全部加油记录与统计数据。
+import_refuel_records:
+  name: 批量导入记录
+  description: 一次性导入多条历史加油记录（如从其他 App 迁移），导入后自动重算统计。
   fields:
     vehicle:
       name: 车辆
-      description: 要清除数据的车辆名称/标识。
+      description: 记录归属的车辆名称/标识（不存在时自动创建）。
+      required: true
+      example: 我的 car
+      selector:
+        text:
+    records:
+      name: 记录列表
+      description: >-
+        记录数组，每条含 date、odometer、volume、total_cost、price、fuel_type、note
+        （均可选，计价规则与"记录加油"一致）。
+      required: true
+      example:
+        - date: "2026-08-01 10:00:00"
+          odometer: 10000
+          volume: 50
+          total_cost: 414.5
+        - date: "2026-08-15 10:00:00"
+          odometer: 10600
+          total_cost: 339.6
+      selector:
+        object:
+
+add_vehicle:
+  name: 添加车辆
+  description: 注册一辆车并设置初始里程与默认油品。
+  fields:
+    vehicle:
+      name: 车辆
+      description: 新车辆的名称/标识。
+      required: true
+      example: 家里的 SUV
+      selector:
+        text:
+    initial_odometer:
+      name: 初始里程
+      description: 开始记录时的里程表读数（公里），作为累计行驶里程的基准。
+      required: false
+      example: 12000
+      selector:
+        number:
+          min: 0
+          max: 10000000
+          step: 0.1
+          unit_of_measurement: km
+          mode: box
+    fuel_type:
+      name: 默认油品
+      description: 该车常用油品（如 92、95、0#），记录加油未指定油品时使用。
+      required: false
+      example: "92"
+      selector:
+        text:
+
+remove_vehicle:
+  name: 删除车辆
+  description: 删除一辆车及其全部加油记录，对应统计实体将一并移除。
+  fields:
+    vehicle:
+      name: 车辆
+      description: 要删除的车辆名称/标识。
+      required: true
+      example: 我的 car
+      selector:
+        text:
+
+clear_vehicle:
+  name: 清空加油记录
+  description: 清空某辆车的全部加油记录并重新计算统计（保留车辆本身）。
+  fields:
+    vehicle:
+      name: 车辆
+      description: 要清空记录的车辆名称/标识。
       required: true
       example: 我的 car
       selector:
@@ -92,4 +168,4 @@ clear_vehicle_data:
 
 refresh_oil_price:
   name: 刷新油价
-  description: 立即从中石化网站刷新所有已配置省份的油价数据。
+  description: 立即从中石化网站刷新所有已配置位置的油价数据。

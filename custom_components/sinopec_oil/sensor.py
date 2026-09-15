@@ -12,7 +12,10 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.dispatcher import (
+    async_dispatcher_connect,
+    async_dispatcher_send,
+)
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -21,6 +24,7 @@ from .const import (
     DOMAIN,
     MANUFACTURER,
     SIGNAL_VEHICLE_ADDED,
+    SIGNAL_VEHICLE_REMOVED,
     UNIT_KM,
     UNIT_L_PER_100KM,
     UNIT_LITER,
@@ -38,20 +42,25 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up sensors from a config entry."""
+    """Set up Sinopec Oil Price sensors from a config entry."""
     runtime: SinopecOilRuntimeData = entry.runtime_data
     price_coordinator = runtime.price_coordinator
     refuel_coordinator = runtime.refuel_coordinator
+    store = runtime.store
 
+    # --- 油价实体 ---
+    oil = price_coordinator.data
     entities: list[SensorEntity] = [
         OilPriceUpdateSensor(price_coordinator, entry.entry_id)
     ]
-    for key in price_coordinator.data.prices:
-        entities.append(OilPriceSensor(price_coordinator, entry.entry_id, key))
+    if oil is not None:
+        for key in oil.prices:
+            entities.append(OilPriceSensor(price_coordinator, entry.entry_id, key))
     async_add_entities(entities)
 
-    # --- 加油统计实体（支持运行中新增车辆） ---
+    # --- 加油统计实体（支持运行中新增/删除车辆） ---
     registry = er.async_get(hass)
+    known_vehicles: set[str] = set()
 
     @callback
     def _add_vehicle_entities(vehicle: Any = None) -> None:
@@ -61,12 +70,9 @@ async def async_setup_entry(
         否则仅处理信号传入的单个车辆。
         """
         if vehicle is None:
-            vehicles = list((refuel_coordinator.data or {}).keys())
+            vehicles = list(store.vehicles.keys())
         else:
             vehicles = [vehicle]
-        known_vehicles: set[str] = getattr(
-            _add_vehicle_entities, "_known", set()
-        )
         new_entities: list[SensorEntity] = []
         for vehicle_name in vehicles:
             if vehicle_name in known_vehicles:
@@ -82,8 +88,9 @@ async def async_setup_entry(
                 VehicleAvgPriceSensor,
                 VehiclePerKmCostSensor,
                 VehicleRefuelCountSensor,
+                VehicleLastRefuelDateSensor,
             ):
-                unique_id = f"{DOMAIN}_{vehicle_name}_{cls.STAT_KEY}"
+                unique_id = f"{DOMAIN}_vehicle_{vehicle_name}_{cls.STAT_KEY}"
                 # 全局唯一 ID：仅当未被其他实例注册时创建
                 if registry.async_is_registered(unique_id):
                     _LOGGER.debug(
@@ -91,11 +98,25 @@ async def async_setup_entry(
                     )
                     continue
                 new_entities.append(
-                    cls(refuel_coordinator, entry.entry_id, vehicle_name)
+                    cls(refuel_coordinator, vehicle_name)
                 )
-        setattr(_add_vehicle_entities, "_known", known_vehicles)
         if new_entities:
             async_add_entities(new_entities)
+
+    @callback
+    def _remove_vehicle_entities(vehicle: str) -> None:
+        """Remove statistics entities of a deleted vehicle."""
+        known_vehicles.discard(vehicle)
+        # 通过 unique_id 找到并删除该车的实体
+        for stat_key in (
+            "odometer", "total_volume", "total_cost", "total_distance",
+            "last_consumption", "avg_consumption", "avg_price",
+            "per_km_cost", "refuel_count", "last_record_date",
+        ):
+            uid = f"{DOMAIN}_vehicle_{vehicle}_{stat_key}"
+            entity_id = registry.async_get_entity_id("sensor", DOMAIN, uid)
+            if entity_id:
+                registry.async_remove(entity_id)
 
     _add_vehicle_entities()
 
@@ -104,13 +125,18 @@ async def async_setup_entry(
             hass, SIGNAL_VEHICLE_ADDED, _add_vehicle_entities
         )
     )
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass, SIGNAL_VEHICLE_REMOVED, _remove_vehicle_entities
+        )
+    )
 
 
-def _oil_device(entry_id: str, province_name: str) -> DeviceInfo:
+def _oil_device(entry_id: str, location_name: str) -> DeviceInfo:
     """Return device info for oil price sensors."""
     return DeviceInfo(
         identifiers={(DOMAIN, f"{entry_id}_oil_price")},
-        name=f"中石化今日油价（{province_name}）",
+        name=f"中石化今日油价（{location_name}）",
         manufacturer=MANUFACTURER,
         model="今日油价查询",
     )
@@ -121,9 +147,9 @@ class OilPriceSensor(CoordinatorEntity, SensorEntity):
 
     _attr_has_entity_name = True
     _attr_icon = "mdi:gas-station"
+    _attr_native_unit_of_measurement = UNIT_YUAN_PER_LITER
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 2
-    _attr_native_unit_of_measurement = UNIT_YUAN_PER_LITER
 
     def __init__(
         self,
@@ -135,68 +161,93 @@ class OilPriceSensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._key = key
         self._attr_unique_id = f"{entry_id}_oil_{key}"
-        self._attr_name = coordinator.data.labels.get(key, key)
-        province = coordinator.data.province_name
-        self._attr_device_info = _oil_device(entry_id, province)
+        oil = coordinator.data
+        self._attr_device_info = _oil_device(
+            entry_id, oil.display_name
+        )
+
+    @property
+    def available(self) -> bool:
+        """Return True if the coordinator has data for this key."""
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self._key in self.coordinator.data.prices
+        )
+
+    @property
+    def name(self) -> str | None:
+        oil = self.coordinator.data
+        if oil is None:
+            return None
+        return oil.labels.get(self._key, self._key)
 
     @property
     def native_value(self) -> float | None:
-        """Return the price."""
-        return self.coordinator.data.prices.get(self._key)
+        oil = self.coordinator.data
+        if oil is None:
+            return None
+        return oil.prices.get(self._key)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return extra attributes."""
-        data = self.coordinator.data
+        oil = self.coordinator.data
         attrs: dict[str, Any] = {
-            "province": data.province_name,
-            "oil_type": self._key,
+            "location": oil.display_name if oil else None,
+            "source": "https://cx.sinopecsales.com/yjkqiantai/core/initCpb",
         }
-        if (change := data.changes.get(self._key)) is not None:
-            attrs["price_change"] = change
-        if data.update_time:
-            attrs["updated_at"] = data.update_time
-        if data.to_day:
-            attrs["date"] = data.to_day
-        attrs["source"] = "中国石化 cx.sinopecsales.com"
+        if oil:
+            attrs["date"] = oil.to_day
+            attrs["updated_at"] = oil.update_time
+            change = oil.changes.get(self._key)
+            if change is not None:
+                attrs["price_change"] = change
         return attrs
 
 
 class OilPriceUpdateSensor(CoordinatorEntity, SensorEntity):
-    """Sensor showing when the oil prices were last updated."""
+    """Sensor for the oil price update time."""
 
     _attr_has_entity_name = True
+    _attr_name = "油价更新时间"
     _attr_icon = "mdi:calendar-clock"
+    _attr_unique_id_prefix = "oil_updated"
 
     def __init__(self, coordinator, entry_id: str) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
+        self._entry_id = entry_id
         self._attr_unique_id = f"{entry_id}_oil_updated"
-        self._attr_name = "油价更新时间"
-        province = coordinator.data.province_name
-        self._attr_device_info = _oil_device(entry_id, province)
+        oil = coordinator.data
+        location = oil.display_name if oil else "未知"
+        self._attr_device_info = _oil_device(entry_id, location)
 
     @property
     def native_value(self) -> str | None:
-        """Return the update time text."""
-        return self.coordinator.data.update_time or self.coordinator.data.to_day
+        oil = self.coordinator.data
+        return oil.update_time if oil else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return extra attributes."""
-        data = self.coordinator.data
+        oil = self.coordinator.data
         return {
-            "province": data.province_name,
-            "date": data.to_day,
-            "updated_at": data.update_time,
-            "oil_types": [
-                data.labels.get(k, k) for k in data.prices
-            ],
+            "date": oil.to_day if oil else None,
+            "location": oil.display_name if oil else None,
         }
 
 
+def _vehicle_device(vehicle: str) -> DeviceInfo:
+    """Return device info for one vehicle."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"vehicle_{vehicle}")},
+        name=f"加油记录（{vehicle}）",
+        manufacturer=MANUFACTURER,
+        model="油耗统计",
+    )
+
+
 class VehicleStatsSensor(CoordinatorEntity, SensorEntity):
-    """Base class for per-vehicle statistics sensors."""
+    """Base class for vehicle refuel statistics sensors."""
 
     _attr_has_entity_name = True
     STAT_KEY: str = ""
@@ -205,58 +256,49 @@ class VehicleStatsSensor(CoordinatorEntity, SensorEntity):
     def __init__(
         self,
         coordinator: RefuelStatsCoordinator,
-        entry_id: str,
         vehicle: str,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._vehicle = vehicle
-        self._attr_unique_id = f"{DOMAIN}_{vehicle}_{self.STAT_KEY}"
-        self._attr_name = self.STAT_NAME
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"refuel_{vehicle}")},
-            name=f"加油记录（{vehicle}）",
-            manufacturer=MANUFACTURER,
-            model="加油记录与油耗统计",
-        )
+        self._attr_unique_id = f"{DOMAIN}_vehicle_{vehicle}_{self.STAT_KEY}"
+        self._attr_device_info = _vehicle_device(vehicle)
 
-    def _stats(self) -> dict[str, Any]:
-        """Return stats for this vehicle."""
-        data = self.coordinator.data or {}
-        return data.get(self._vehicle, {})
+    @property
+    def name(self) -> str:
+        return self.STAT_NAME
 
     @property
     def available(self) -> bool:
-        """Available if the vehicle has stats."""
-        return self.coordinator.last_update_success and bool(
-            self._stats().get("refuel_count")
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self._vehicle in self.coordinator.data
         )
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return extra attributes."""
-        stats = self._stats()
-        return {
-            "vehicle": self._vehicle,
-            "refuel_count": stats.get("refuel_count", 0),
-            "last_record_date": stats.get("last_record_date"),
-        }
+    def _stats(self) -> dict[str, Any]:
+        data = self.coordinator.data or {}
+        return data.get(self._vehicle) or {}
 
 
 class VehicleOdometerSensor(VehicleStatsSensor):
-    """Latest odometer reading."""
+    """Current odometer reading."""
 
     STAT_KEY = "odometer"
     STAT_NAME = "当前里程表"
     _attr_icon = "mdi:counter"
-    _attr_device_class = SensorDeviceClass.DISTANCE
     _attr_native_unit_of_measurement = UNIT_KM
+    _attr_device_class = SensorDeviceClass.DISTANCE
     _attr_state_class = SensorStateClass.TOTAL
     _attr_suggested_display_precision = 1
 
     @property
     def native_value(self) -> float | None:
         return self._stats().get("odometer")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"vehicle": self._vehicle}
 
 
 class VehicleTotalVolumeSensor(VehicleStatsSensor):
@@ -290,13 +332,13 @@ class VehicleTotalCostSensor(VehicleStatsSensor):
 
 
 class VehicleTotalDistanceSensor(VehicleStatsSensor):
-    """Total driven distance between refuels."""
+    """Total driving distance."""
 
     STAT_KEY = "total_distance"
     STAT_NAME = "累计行驶里程"
     _attr_icon = "mdi:map-marker-distance"
-    _attr_device_class = SensorDeviceClass.DISTANCE
     _attr_native_unit_of_measurement = UNIT_KM
+    _attr_device_class = SensorDeviceClass.DISTANCE
     _attr_state_class = SensorStateClass.TOTAL
     _attr_suggested_display_precision = 1
 
@@ -304,13 +346,19 @@ class VehicleTotalDistanceSensor(VehicleStatsSensor):
     def native_value(self) -> float | None:
         return self._stats().get("total_distance")
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "record_period_distance": self._stats().get("record_distance"),
+        }
+
 
 class VehicleLastConsumptionSensor(VehicleStatsSensor):
-    """Fuel consumption of the latest refuel interval."""
+    """Fuel consumption of the last refuel interval."""
 
     STAT_KEY = "last_consumption"
     STAT_NAME = "最近油耗"
-    _attr_icon = "mdi:chart-line"
+    _attr_icon = "mdi:gas-pump"
     _attr_native_unit_of_measurement = UNIT_L_PER_100KM
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 2
@@ -319,19 +367,13 @@ class VehicleLastConsumptionSensor(VehicleStatsSensor):
     def native_value(self) -> float | None:
         return self._stats().get("last_consumption")
 
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        attrs = super().extra_state_attributes
-        attrs["last_distance"] = self._stats().get("last_distance")
-        return attrs
-
 
 class VehicleAvgConsumptionSensor(VehicleStatsSensor):
     """Average fuel consumption."""
 
     STAT_KEY = "avg_consumption"
     STAT_NAME = "平均油耗"
-    _attr_icon = "mdi:chart-areaspline"
+    _attr_icon = "mdi:chart-line"
     _attr_native_unit_of_measurement = UNIT_L_PER_100KM
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 2
@@ -342,7 +384,7 @@ class VehicleAvgConsumptionSensor(VehicleStatsSensor):
 
 
 class VehicleAvgPriceSensor(VehicleStatsSensor):
-    """Average fuel price (total cost / total volume)."""
+    """Average fuel price paid."""
 
     STAT_KEY = "avg_price"
     STAT_NAME = "平均油价"
@@ -383,3 +425,16 @@ class VehicleRefuelCountSensor(VehicleStatsSensor):
     @property
     def native_value(self) -> int | None:
         return self._stats().get("refuel_count")
+
+
+class VehicleLastRefuelDateSensor(VehicleStatsSensor):
+    """Date of the last refuel."""
+
+    STAT_KEY = "last_record_date"
+    STAT_NAME = "最近加油日期"
+    _attr_icon = "mdi:calendar"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    @property
+    def native_value(self) -> str | None:
+        return self._stats().get("last_record_date")

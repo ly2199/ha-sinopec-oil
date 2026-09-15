@@ -5,13 +5,23 @@ https://cx.sinopecsales.com/yjkqiantai/core/initCpb
 
 接口流程（实测验证）：
 1. GET  /yjkqiantai/core/initCpb      —— 建立会话（Cookie）
-2. POST /yjkqiantai/data/switchProvince  body={"provinceId": "11"} —— 切换省份
-3. GET  /yjkqiantai/data/initMainData    —— 获取当前省份油价数据
+2. POST /yjkqiantai/data/switchProvince  body={"provinceId": "11"} —— 切换省份（会话级）
+3. GET  /yjkqiantai/data/initMainData    —— 当日油价（含价区 area 列表）
+4. GET  /yjkqiantai/data/initOilPrice    —— 历史调价周期列表（约 24 期）
+
+价区说明：
+- 部分省份（如云南 53、四川 51）按价区（一价区/二价区…）发布价格，
+  省级 provinceData 为空，必须从 area[] 中按 AREA_ID 选择；
+- 部分省份（如北京、广东、湖北）全省一价，area 为空。
+- 历史接口同样遵循该结构：无价区省 provinceData 为周期列表，
+  有价区省 area[].areaData 为周期列表。
 """
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
+from datetime import date as dt_date, datetime, timedelta
 from typing import Any
 
 import aiohttp
@@ -23,6 +33,10 @@ from .const import (
     PROVINCES,
     USER_AGENT,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+HISTORY_CACHE_TTL = timedelta(minutes=10)
 
 
 class SinopecOilApiClientError(Exception):
@@ -39,10 +53,12 @@ class SinopecOilInvalidData(SinopecOilApiClientError):
 
 @dataclass
 class OilPriceData:
-    """Parsed oil price data for one province."""
+    """Parsed current oil price data for one province/area."""
 
     province_id: str
     province_name: str
+    area_id: str | None = None
+    area_name: str | None = None
     to_day: str | None = None
     update_time: str | None = None
     prices: dict[str, float] = field(default_factory=dict)
@@ -50,8 +66,27 @@ class OilPriceData:
     labels: dict[str, str] = field(default_factory=dict)
 
     @property
-    def price_count(self) -> int:
-        return len(self.prices)
+    def display_name(self) -> str:
+        """Province + area display name."""
+        if self.area_name:
+            return f"{self.province_name}·{self.area_name}"
+        return self.province_name
+
+    def price_for(self, keys: tuple[str, ...]) -> float | None:
+        """Return the first available price for candidate data keys."""
+        for key in keys:
+            if key in self.prices:
+                return self.prices[key]
+        return None
+
+
+@dataclass
+class HistoryPeriod:
+    """One price adjustment period (生效周期)."""
+
+    start: dt_date
+    end: dt_date
+    prices: dict[str, float] = field(default_factory=dict)
 
 
 class SinopecOilApiClient:
@@ -61,28 +96,33 @@ class SinopecOilApiClient:
     避免多个不同省份的集成实例之间会话数据互相干扰。
     """
 
-    def __init__(self, province_id: str) -> None:
+    def __init__(self, province_id: str, area_id: str | None = None) -> None:
         """Initialize the client."""
         self.province_id = province_id
+        self.area_id = str(area_id) if area_id else None
         self.province_name = PROVINCES.get(province_id, province_id)
         self._session: aiohttp.ClientSession | None = None
         self._request_lock = asyncio.Lock()
+        self._history_cache: tuple[datetime, list[HistoryPeriod]] | None = None
 
-    async def async_close(self) -> None:
-        """Close the underlying session."""
-        if self._session is not None:
-            await self._session.close()
-            self._session = None
-
+    # ------------------------------------------------------------------
+    # HTTP 基础
+    # ------------------------------------------------------------------
     def _get_session(self) -> aiohttp.ClientSession:
-        """Lazily create a session with an isolated cookie jar."""
-        if self._session is None or self._session.closed:
+        """Lazily create a dedicated session (own cookie jar)."""
+        if self._session is None:
             self._session = aiohttp.ClientSession(
                 cookie_jar=aiohttp.CookieJar(),
                 timeout=aiohttp.ClientTimeout(total=30),
                 headers={"User-Agent": USER_AGENT, "Referer": PAGE_URL},
             )
         return self._session
+
+    async def async_close(self) -> None:
+        """Close the underlying session."""
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
 
     async def _request(
         self, method: str, path: str, *, expect_json: bool = True, **kwargs: Any
@@ -93,11 +133,9 @@ class SinopecOilApiClient:
         try:
             async with session.request(method, url, **kwargs) as resp:
                 if resp.status != 200:
-                    raise SinopecOilCannotConnect(
-                        f"HTTP {resp.status} for {url}"
-                    )
+                    raise SinopecOilCannotConnect(f"HTTP {resp.status} for {url}")
                 if not expect_json:
-                    # 用于初始化页面的请求（返回 HTML，仅建立会话 Cookie）
+                    # 初始化页面请求返回 HTML，仅用于建立会话 Cookie
                     return await resp.text()
                 try:
                     return await resp.json(content_type=None)
@@ -110,43 +148,58 @@ class SinopecOilApiClient:
         except aiohttp.ClientError as err:
             raise SinopecOilCannotConnect(f"Client error for {url}: {err}") from err
 
+    async def _init_session_and_switch(self) -> None:
+        """Init session cookie and switch to the configured province."""
+        # 1) 初始化会话（返回 HTML 页面，仅获取 Cookie）
+        await self._request("GET", "/yjkqiantai/core/initCpb", expect_json=False)
+        # 2) 切换省份（会话级别生效）
+        await self._request(
+            "POST",
+            "/yjkqiantai/data/switchProvince",
+            json={"provinceId": self.province_id},
+        )
+
+    # ------------------------------------------------------------------
+    # 当日油价
+    # ------------------------------------------------------------------
     async def async_get_oil_prices(self) -> OilPriceData:
-        """Fetch oil prices: init session -> switch province -> get data."""
+        """Fetch current oil prices for the configured province/area."""
         async with self._request_lock:
-            # 1) 初始化会话（返回 HTML 页面，仅获取 Cookie）
-            await self._request(
-                "GET", "/yjkqiantai/core/initCpb", expect_json=False
-            )
-
-            # 2) 切换省份（会话级别生效）
-            await self._request(
-                "POST",
-                "/yjkqiantai/data/switchProvince",
-                json={"provinceId": self.province_id},
-            )
-
-            # 3) 获取油价数据
+            await self._init_session_and_switch()
             raw = await self._request("GET", "/yjkqiantai/data/initMainData")
+        return self._parse_main(raw)
 
-        return self._parse(raw)
-
-    def _parse(self, raw: dict[str, Any]) -> OilPriceData:
+    def _parse_main(self, raw: dict[str, Any]) -> OilPriceData:
         """Parse the initMainData payload."""
-        if not isinstance(raw, dict):
-            raise SinopecOilInvalidData("Response is not a JSON object")
-
         payload = raw.get("data") or {}
         check: dict[str, Any] = dict(payload.get("provinceCheck") or {})
         pdata: dict[str, Any] = dict(payload.get("provinceData") or {})
         areas = payload.get("area") or []
 
-        # 部分省份省级数据为空，回落到第一个地级市数据
-        if not any(_is_valid_price(v) for v in pdata.values()) and areas:
-            first = areas[0] or {}
-            area_check = first.get("areaCheck") or {}
-            area_data = first.get("areaData") or {}
-            check = {k: v for k, v in area_check.items() if v is not None} or check
-            pdata = area_data or pdata
+        area_name: str | None = None
+
+        # 价区选择：指定 AREA_ID 优先，其次默认第一个价区，
+        # 仅当无价区时才使用省级数据
+        if areas:
+            matched = None
+            if self.area_id is not None:
+                matched = next(
+                    (
+                        a
+                        for a in areas
+                        if str((a.get("areaCheck") or {}).get("AREA_ID"))
+                        == str(self.area_id)
+                    ),
+                    None,
+                )
+            if matched is None:
+                matched = areas[0]
+            area_check = matched.get("areaCheck") or {}
+            area_name = area_check.get("AREA_NAME")
+            self.area_id = str(area_check.get("AREA_ID") or self.area_id)
+            pdata = dict(matched.get("areaData") or {})
+            if area_check:
+                check = {k: v for k, v in area_check.items() if v is not None}
 
         prices: dict[str, float] = {}
         changes: dict[str, float] = {}
@@ -158,27 +211,204 @@ class SinopecOilApiClient:
             value = pdata.get(data_key)
             if not _is_valid_price(value):
                 continue
-            key = data_key  # 传感器使用数据字段名作为稳定 key
-            prices[key] = float(value)
-            labels[key] = label
+            prices[data_key] = float(value)
+            labels[data_key] = label
             status = pdata.get(f"{data_key}_STATUS")
             if isinstance(status, (int, float)):
-                changes[key] = float(status)
+                changes[data_key] = float(status)
 
         if not prices:
-            raise SinopecOilInvalidData(
-                "No valid oil price found in the response"
-            )
+            raise SinopecOilInvalidData("No valid oil price found in the response")
 
         return OilPriceData(
             province_id=self.province_id,
-            province_name=PROVINCES.get(self.province_id, self.province_id),
+            province_name=self.province_name,
+            area_id=self.area_id,
+            area_name=area_name,
             to_day=raw.get("toDay"),
             update_time=pdata.get("START_DATE"),
             prices=prices,
             changes=changes,
             labels=labels,
         )
+
+    # ------------------------------------------------------------------
+    # 历史油价（按调价周期）
+    # ------------------------------------------------------------------
+    async def async_get_price_history(
+        self, force_refresh: bool = False
+    ) -> list[HistoryPeriod]:
+        """Fetch the list of historical price periods (cached)."""
+        now = datetime.now()
+        if (
+            not force_refresh
+            and self._history_cache is not None
+            and now - self._history_cache[0] < HISTORY_CACHE_TTL
+        ):
+            return self._history_cache[1]
+
+        async with self._request_lock:
+            await self._init_session_and_switch()
+            raw = await self._request("GET", "/yjkqiantai/data/initOilPrice")
+
+        periods = self._parse_history(raw)
+        self._history_cache = (now, periods)
+        return periods
+
+    def _parse_history(self, raw: dict[str, Any]) -> list[HistoryPeriod]:
+        """Parse the initOilPrice payload into sorted periods (newest first)."""
+        payload = raw.get("data") or {}
+        rows: list[dict[str, Any]] | None = payload.get("provinceData")
+        if rows is None:
+            areas = payload.get("area") or []
+            matched = None
+            if areas:
+                if self.area_id is not None:
+                    matched = next(
+                        (
+                            a
+                            for a in areas
+                            if str((a.get("areaCheck") or {}).get("AREA_ID"))
+                            == str(self.area_id)
+                        ),
+                        None,
+                    )
+                if matched is None:
+                    matched = areas[0]
+            rows = (matched or {}).get("areaData") if matched else None
+
+        if not isinstance(rows, list) or not rows:
+            raise SinopecOilInvalidData("No historical price periods found")
+
+        periods: list[HistoryPeriod] = []
+        for row in rows:
+            start = _parse_date_str(row.get("START_TIME") or row.get("STR_START_DATE"))
+            end = _parse_date_str(row.get("END_TIME"))
+            if start is None or end is None:
+                continue
+            prices = {
+                key: float(value)
+                for key, value in row.items()
+                if key in {dk for _, (dk, _) in OIL_TYPE_MAP.items()}
+                and _is_valid_price(value)
+            }
+            periods.append(HistoryPeriod(start=start, end=end, prices=prices))
+
+        if not periods:
+            raise SinopecOilInvalidData("No valid historical price periods")
+
+        periods.sort(key=lambda p: p.start, reverse=True)
+        return periods
+
+    async def async_get_price_on(
+        self, data_keys: tuple[str, ...], when: dt_date
+    ) -> tuple[float, str, bool] | None:
+        """Return (price, period_label, approximate) for a given date.
+
+        - 日期落在某个调价周期内 → 该周期价格；
+        - 日期晚于最新周期 → 最新周期价格；
+        - 日期早于最早周期（超出历史范围）→ 最早周期价格（近似值）。
+        找不到任何候选油品价格时返回 None。
+        """
+        periods = await self.async_get_price_history()
+
+        def _first_price(period: HistoryPeriod) -> float | None:
+            for key in data_keys:
+                if key in period.prices:
+                    return period.prices[key]
+            return None
+
+        # 晚于最新周期：用最新价格
+        latest = periods[0]
+        if when > latest.end:
+            price = _first_price(latest)
+            if price is not None:
+                return (
+                    price,
+                    f"{latest.start.isoformat()} 起价格",
+                    True,
+                )
+
+        for period in periods:
+            if period.start <= when <= period.end:
+                price = _first_price(period)
+                if price is not None:
+                    return (
+                        price,
+                        f"{period.start.isoformat()}~{period.end.isoformat()} 调价周期",
+                        False,
+                    )
+
+        # 早于最早周期：用最早价格（近似）
+        oldest = periods[-1]
+        price = _first_price(oldest)
+        if price is not None:
+            return (
+                price,
+                f"{oldest.start.isoformat()} 起价格（超出历史范围，近似）",
+                True,
+            )
+        return None
+
+    # ------------------------------------------------------------------
+    # 价区列表（供配置流选择）
+    # ------------------------------------------------------------------
+    async def async_list_areas(self) -> list[dict[str, Any]]:
+        """Return the area list for the province.
+
+        [{id, name, sample_price(92号等基准油品价), sample_label}]
+        """
+        async with self._request_lock:
+            await self._init_session_and_switch()
+            raw = await self._request("GET", "/yjkqiantai/data/initMainData")
+
+        payload = raw.get("data") or {}
+        areas = payload.get("area") or []
+        result: list[dict[str, Any]] = []
+        for area in areas:
+            check = area.get("areaCheck") or {}
+            pdata = area.get("areaData") or {}
+            sample_key, sample_price = None, None
+            for _, (data_key, label) in OIL_TYPE_MAP.items():
+                if _is_valid_price(pdata.get(data_key)):
+                    sample_key, sample_price = label, pdata[data_key]
+                    break
+            result.append(
+                {
+                    "id": str(check.get("AREA_ID")),
+                    "name": check.get("AREA_NAME") or str(check.get("AREA_ID")),
+                    "sample_label": sample_key,
+                    "sample_price": sample_price,
+                }
+            )
+        return result
+
+
+def resolve_fuel_keys(fuel_type: str) -> tuple[str, ...]:
+    """Resolve a user fuel type (e.g. "92", "0", "GAS_92") to data keys."""
+    from .const import FUEL_TYPE_ALIASES  # 局部导入避免循环
+
+    normalized = (fuel_type or "").strip().lower()
+    if normalized in FUEL_TYPE_ALIASES:
+        return FUEL_TYPE_ALIASES[normalized]
+    upper = (fuel_type or "").strip().upper()
+    if upper in {dk for _, (dk, _) in OIL_TYPE_MAP.items()}:
+        return (upper,)
+    # 模糊匹配：输入包含别名键（如 "92号"、"0#柴油"）
+    for alias, keys in FUEL_TYPE_ALIASES.items():
+        if alias in normalized:
+            return keys
+    return ()
+
+
+def _parse_date_str(value: Any) -> dt_date | None:
+    """Parse '2026-09-12 00:00:00' / '2026-09-12' to date."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def _is_valid_price(value: Any) -> bool:
