@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date as dt_date
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -51,7 +52,8 @@ async def async_setup_entry(
     # --- 油价实体 ---
     oil = price_coordinator.data
     entities: list[SensorEntity] = [
-        OilPriceUpdateSensor(price_coordinator, entry.entry_id)
+        OilPriceUpdateSensor(price_coordinator, entry.entry_id),
+        OilPricePeriodEndSensor(price_coordinator, entry.entry_id),
     ]
     if oil is not None:
         for key in oil.prices:
@@ -89,6 +91,8 @@ async def async_setup_entry(
                 VehiclePerKmCostSensor,
                 VehicleRefuelCountSensor,
                 VehicleLastRefuelDateSensor,
+                VehicleRecentRecordSensor,
+                VehicleQualitySensor,
             ):
                 unique_id = f"{DOMAIN}_vehicle_{vehicle_name}_{cls.STAT_KEY}"
                 # 全局唯一 ID：仅当未被其他实例注册时创建
@@ -97,9 +101,14 @@ async def async_setup_entry(
                         "跳过已注册实体 %s（由其他实例管理）", unique_id
                     )
                     continue
-                new_entities.append(
-                    cls(refuel_coordinator, vehicle_name)
-                )
+                if cls in (VehicleRecentRecordSensor, VehicleQualitySensor):
+                    new_entities.append(
+                        cls(refuel_coordinator, vehicle_name, store)
+                    )
+                else:
+                    new_entities.append(
+                        cls(refuel_coordinator, vehicle_name)
+                    )
         if new_entities:
             async_add_entities(new_entities)
 
@@ -112,6 +121,7 @@ async def async_setup_entry(
             "odometer", "total_volume", "total_cost", "total_distance",
             "last_consumption", "avg_consumption", "avg_price",
             "per_km_cost", "refuel_count", "last_record_date",
+            "recent_record", "data_quality",
         ):
             uid = f"{DOMAIN}_vehicle_{vehicle}_{stat_key}"
             entity_id = registry.async_get_entity_id("sensor", DOMAIN, uid)
@@ -195,8 +205,10 @@ class OilPriceSensor(CoordinatorEntity, SensorEntity):
         attrs: dict[str, Any] = {
             "location": oil.display_name if oil else None,
             "source": "https://cx.sinopecsales.com/yjkqiantai/core/initCpb",
+            "sinopec_role": "sinopec_price",
         }
         if oil:
+            attrs["label"] = oil.labels.get(self._key, self._key)
             attrs["date"] = oil.to_day
             attrs["updated_at"] = oil.update_time
             change = oil.changes.get(self._key)
@@ -234,6 +246,7 @@ class OilPriceUpdateSensor(CoordinatorEntity, SensorEntity):
         attrs: dict[str, Any] = {
             "date": oil.to_day if oil else None,
             "location": oil.display_name if oil else None,
+            "sinopec_role": "sinopec_price_history",
         }
         if oil and oil.price_history:
             # 历史调价周期（完整数据，最近 6 期在前的为当前与相邻周期）
@@ -243,6 +256,64 @@ class OilPriceUpdateSensor(CoordinatorEntity, SensorEntity):
                 attrs["current_period"] = (
                     f"{current['start']} ~ {current['end']}"
                 )
+        return attrs
+
+
+class OilPricePeriodEndSensor(CoordinatorEntity, SensorEntity):
+    """当前调价周期结束日（下次调价参考日）。"""
+
+    _attr_has_entity_name = True
+    _attr_name = "调价周期结束日"
+    _attr_icon = "mdi:calendar-end"
+    _attr_device_class = SensorDeviceClass.DATE
+
+    def __init__(self, coordinator, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry_id}_oil_period_end"
+        oil = coordinator.data
+        location = oil.display_name if oil else "未知"
+        self._attr_device_info = _oil_device(entry_id, location)
+
+    @property
+    def available(self) -> bool:
+        oil = self.coordinator.data
+        return (
+            super().available
+            and oil is not None
+            and bool(oil.price_history)
+        )
+
+    @property
+    def native_value(self):
+        oil = self.coordinator.data
+        if oil is None or not oil.price_history:
+            return None
+        end = str(oil.price_history[0].get("end", ""))
+        try:
+            return dt_date.fromisoformat(end)
+        except ValueError:
+            return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        oil = self.coordinator.data
+        attrs: dict[str, Any] = {
+            "sinopec_role": "sinopec_period_end",
+        }
+        if oil is not None and oil.price_history:
+            current = oil.price_history[0]
+            attrs["current_period"] = (
+                f"{current.get('start')} ~ {current.get('end')}"
+            )
+            try:
+                days = (
+                    dt_date.fromisoformat(str(current.get("end")))
+                    - dt_date.today()
+                ).days
+                attrs["days_left"] = days
+            except (ValueError, TypeError):
+                pass
         return attrs
 
 
@@ -448,3 +519,119 @@ class VehicleLastRefuelDateSensor(VehicleStatsSensor):
     @property
     def native_value(self) -> str | None:
         return self._stats().get("last_record_date")
+
+
+class VehicleRecentRecordSensor(VehicleStatsSensor):
+    """最近一次加油摘要；属性携带该车全部记录（供卡片渲染）。
+
+    记录按时间序排列，index 与 delete/edit 服务的序号一致。
+    """
+
+    STAT_KEY = "recent_record"
+    STAT_NAME = "最近加油"
+    _attr_icon = "mdi:fuel"
+
+    def __init__(
+        self,
+        coordinator: RefuelStatsCoordinator,
+        vehicle: str,
+        store,
+    ) -> None:
+        """Initialize with a store reference for record listing."""
+        super().__init__(coordinator, vehicle)
+        self._store = store
+
+    @property
+    def native_value(self) -> str | None:
+        records = self._store.get_records_sorted(self._vehicle)
+        if not records:
+            return "暂无记录"
+        rec = records[-1]
+        parts = []
+        if rec.get("volume") is not None:
+            parts.append(f"{rec['volume']}L")
+        if rec.get("total_cost") is not None:
+            parts.append(f"{rec['total_cost']}元")
+        if rec.get("price") is not None:
+            parts.append(f"{rec['price']}元/L")
+        return f"{str(rec.get('date', ''))[:10]} · " + (
+            " · ".join(parts) if parts else "无明细"
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        records = self._store.get_records_sorted(self._vehicle)
+        items: list[dict[str, Any]] = []
+        prev_odo = None
+        for idx, rec in enumerate(records):
+            odo = rec.get("odometer")
+            seg_distance = None
+            seg_consumption = None
+            if odo is not None and prev_odo is not None:
+                diff = float(odo) - float(prev_odo)
+                if 0 < diff <= 900:
+                    seg_distance = round(diff, 1)
+                    if rec.get("volume"):
+                        seg_consumption = round(
+                            float(rec["volume"]) / diff * 100, 2
+                        )
+            items.append(
+                {
+                    "index": idx,
+                    "date": rec.get("date"),
+                    "odometer": odo,
+                    "volume": rec.get("volume"),
+                    "total_cost": rec.get("total_cost"),
+                    "price": rec.get("price"),
+                    "fuel_type": rec.get("fuel_type") or "",
+                    "note": rec.get("note") or "",
+                    "segment_distance": seg_distance,
+                    "segment_consumption": seg_consumption,
+                }
+            )
+            if odo is not None:
+                prev_odo = float(odo)
+        return {
+            "vehicle": self._vehicle,
+            "sinopec_role": "sinopec_records",
+            "count": len(items),
+            "records": items,
+        }
+
+
+class VehicleQualitySensor(VehicleStatsSensor):
+    """数据质量：时间-里程一致性校验结果（必须修正才能算油耗）。"""
+
+    STAT_KEY = "data_quality"
+    STAT_NAME = "数据质量"
+    _attr_icon = "mdi:check-circle"
+
+    def __init__(
+        self,
+        coordinator: RefuelStatsCoordinator,
+        vehicle: str,
+        store,
+    ) -> None:
+        """Initialize with a store reference."""
+        super().__init__(coordinator, vehicle)
+        self._store = store
+
+    @property
+    def native_value(self) -> str:
+        problems = self._stats().get("quality_problems") or []
+        if not problems:
+            return "正常"
+        return f"需修正（{len(problems)} 项）"
+
+    @property
+    def icon(self) -> str:
+        problems = self._stats().get("quality_problems") or []
+        return "mdi:alert-circle" if problems else "mdi:check-circle"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "vehicle": self._vehicle,
+            "sinopec_role": "sinopec_quality",
+            "problems": self._stats().get("quality_problems") or [],
+        }

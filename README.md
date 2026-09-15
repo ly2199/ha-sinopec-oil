@@ -2,7 +2,7 @@
 
 ![HA 版本](https://img.shields.io/badge/Home%20Assistant-2024.6%2B-blue)
 ![HACS](https://img.shields.io/badge/HACS-Custom-green)
-![版本](https://img.shields.io/badge/版本-1.0.0-orange)
+![版本](https://img.shields.io/badge/版本-1.0.1-orange)
 
 一个 [Home Assistant](https://www.home-assistant.io/) 的 [HACS](https://hacs.xyz/) 自定义集成：
 
@@ -140,50 +140,53 @@ service: sinopec_oil.get_price_history
 
 同样数据也挂在 **"油价更新时间"传感器的 `price_history` 属性**中，仪表盘可直接引用。
 
-### 可视化填表录入（推荐：自带表单，零配置）
+### 可视化操作：自定义卡片（推荐，一步到位）
 
-**方式一：集成自带"加油填表"实体（最简单）**。安装集成后 HA 自动出现一个
-**「加油填表」设备**，包含：车辆（下拉，自动列出现有车辆）、里程表读数、
-加油量、加油费用、油品类型、加油时间、备注、**提交加油记录**按钮。
-无需创建任何助手/自动化：
+**安装卡片（一次性）**：
 
-1. 仪表盘 → 编辑 → 添加卡片 → **按实体** → 依次勾选「加油填表」设备下的实体
-   （或直接用下方 YAML，实体 ID 以你实例中实际生成的为准）；
-2. 填表 → 点「提交加油记录」→ 弹出通知显示加油量/费用/单价/计价来源/最近油耗，
-   表单自动清零（保留车辆选择，**里程表自动带出该车当前读数**）；
-3. 只填加油量 → 自动按当时油价算费用；只填费用 → 自动算加油量；
-   修改「加油时间」为历史日期 → 自动按该日期的历史油价计算；
-   油品选「自动」= 用该车的默认油品；
-   **切换车辆时里程表会自动切换为该车的当前读数**，通常只需填量或费用一项。
+1. 把发行包里的 `www/sinopec-oil-card.js` 复制到 HA 配置目录的
+   `config/www/` 下（可 scp/Samba/文件管理器插件）；
+2. 仪表盘 → 右上角 ⋮ → **管理资源** → 添加资源：
+   URL `local/sinopec-oil-card.js`，类型 JavaScript 模块；
+3. 仪表盘 → 添加卡片 → **手动**：
 
 ```yaml
-type: entities
-title: ⛽ 加油填表
-entities:
-  - entity: select.zhongshihua_jiayou_tianbiao_cheliang
-    name: 车辆
-  - entity: number.zhongshihua_jiayou_tianbiao_lichengbiao_dushu
-    name: 里程表读数 (km)
-  - entity: number.zhongshihua_jiayou_tianbiao_jiayouliang
-    name: 加油量 (L，可不填)
-  - entity: number.zhongshihua_jiayou_tianbiao_jiayoufeiyong
-    name: 费用 (元，可不填)
-  - entity: select.zhongshihua_jiayou_tianbiao_youpin_leixing
-    name: 油品（自动/92/95/0#…）
-  - entity: datetime.zhongshihua_jiayou_tianbiao_jiayou_shijian
-    name: 加油时间
-  - entity: text.zhongshihua_jiayou_tianbiao_beizhu
-    name: 备注
-  - entity: button.zhongshihua_jiayou_tianbiao_tijiao_jiayou_jilu
-    name: 提交加油记录
+type: custom:sinopec-oil-card
+# 可选配置：
+# title: 我的油卡
+# vehicle: 大白   # 默认车辆（不填则自动记住上次选择）
 ```
 
-**方式二：开发者工具直接填表**。开发者工具 → 动作 → 选择
-`sinopec_oil.record_refuel`，同样会渲染完整表单。
+卡片**自动发现**本集成全部实体（按内部角色标记，非实体 ID），
+**无需填写任何实体 ID**，换实体 ID 也不受影响。
 
-**方式三：自动化蓝图**（需要先创建 7 个助手，适合想把表单嵌入复杂自动化
-的用户）：导入蓝图 `中石化油价 · 加油记录填表`（见
-`blueprints/automation/sinopec_oil/refuel_form.yaml`）。
+**四个页签**：
+
+- **⛽ 加油**：选车（里程自动带出当前读数）→ 填加油量或费用任一项
+  （都填则单价=费用÷量）→ 提交。卡片内直接显示计算结果：
+  加油量/费用/单价/计价来源/本次区间里程与油耗。改"加油时间"
+  为历史日期 → 自动按该日期的历史油价计价；油品"自动"= 用该车默认油品。
+- **📋 历史**：全部加油记录表格（日期/里程/量/费/单价/区间油耗/备注），
+  每条可 **删除**、点开 **修改**（量费改动自动重算另一项）；
+  支持 **批量导入**（粘贴多行 `日期, 里程, 加油量, 费用[, 油品][, 备注]`，
+  冲突行会被拒绝并逐行说明原因）。
+- **📈 油价**：当前各油品价格 + 历史调价周期表 + 92号汽油近 12 期走势。
+- **🚗 统计**：当前里程/总费用/平均油耗/平均油价/每公里油费/加油次数 +
+  数据质量提示。
+
+**油耗计算规则（重要）**：相邻两次加油的区间里程必须满足
+**0 < 里程差 ≤ 900 km**，且时间顺序与里程顺序一致。
+
+- 提交/导入/修改时自动校验，**冲突记录直接拒绝入库**并说明原因
+  （历史补录需插在正确的时间位置，里程与前后记录同步递增）；
+- 若存储中已存在不一致记录（如手改过 storage），"最近油耗/平均油耗"
+  显示**未知**，"数据质量"传感器与卡片会列出每一条问题及修正建议；
+  在卡片"历史"页修正或删除问题记录后统计自动恢复。
+
+**不想装 JS 卡片？** 备选：集成自带「加油填表」设备
+（仪表盘 → 添加卡片 → 按实体 → 勾选该设备全部实体，里程自动预填，
+点提交按钮录入，结果见通知）；或开发者工具 → 动作 →
+`sinopec_oil.record_refuel` 直接填表单。功能等价，体验弱于卡片。
 
 ### 车辆管理服务
 
@@ -219,6 +222,14 @@ sinopec_oil.refresh_oil_price:  # 立即刷新油价
 | 每公里油费 | 元/km | 累计费用 ÷ 累计行驶里程 |
 | 加油次数 | 次 | 记录条数 |
 | 最近加油日期 | - | 最后一次加油时间 |
+| 最近加油 | - | 摘要（日期 · 量 · 费 · 单价）；属性 `records` 为全部记录（含序号/区间里程/区间油耗），序号与 delete/edit 服务一致 |
+| 数据质量 | - | "正常"或"需修正（N 项）"；属性 `problems` 列出每条时间-里程不一致问题（见上文油耗计算规则） |
+
+### 油价位置新增实体
+
+| 实体 | 说明 |
+| --- | --- |
+| `sensor.*_调价周期结束日` | 当前调价周期截止日（date），属性含 `days_left` 剩余天数，可用于调价日自动化提醒 |
 
 ---
 

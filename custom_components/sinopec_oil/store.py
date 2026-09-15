@@ -36,16 +36,22 @@ def _parse_date(value: Any) -> dt_date | None:
 def compute_stats(
     records: list[dict[str, Any]],
     initial_odometer: float | None = None,
+    max_segment_km: float = 900.0,
 ) -> dict[str, Any]:
     """Compute statistics for a vehicle from its refuel records.
 
     油耗计算逻辑（假设每次都加满）：
-    - 相邻两次加油的里程差 = 该区间行驶里程
+    - 记录按加油时间升序排序（同日按登记先后）
+    - 相邻两次加油的里程差 = 该区间行驶里程，必须满足
+      0 < 里程差 ≤ max_segment_km（默认 900 km），否则判定为
+      "时间与里程不对应"的异常区间
     - 该区间油耗 = 本次加油量 / 区间里程 * 100（L/100km）
     - 累计平均油耗 = (首条记录之外的所有加油量之和) / 记录期总里程 * 100
-      （首箱油对应的是开始记录之前的消耗，无法统计，故不计入）
     - 累计行驶里程：若配置了初始里程，则为 最新里程-初始里程；
       否则为相邻记录里程差之和。
+    - 【必须修正才能算】存在任何异常区间或缺失里程时，
+      油耗类指标（最近油耗/平均油耗）返回 None，问题写入
+      quality_problems 清单；修正或删除问题记录后自动恢复。
     """
     stats: dict[str, Any] = {
         "refuel_count": len(records),
@@ -60,6 +66,7 @@ def compute_stats(
         "avg_price": None,
         "per_km_cost": None,
         "last_record_date": None,
+        "quality_problems": [],
     }
     if not records:
         # 无记录：里程表回退到配置的初始里程（传感器不再显示"未知"）
@@ -68,8 +75,10 @@ def compute_stats(
             stats["total_distance"] = 0.0
         return stats
 
+    # 稳定排序：日期相同保持登记先后
     sorted_records = sorted(records, key=lambda r: str(r.get("date", "")))
 
+    problems: list[str] = []
     total_volume = 0.0
     total_cost = 0.0
     consumption_volumes = 0.0
@@ -78,29 +87,63 @@ def compute_stats(
     last_consumption = None
     prev = None
 
-    for rec in sorted_records:
+    for idx, rec in enumerate(sorted_records):
         odometer = _to_float(rec.get("odometer"))
         volume = _to_float(rec.get("volume")) or 0.0
         cost = _to_float(rec.get("total_cost")) or 0.0
         total_volume += volume
         total_cost += cost
+        rec_date = str(rec.get("date", ""))[:16]
 
-        if prev is not None and odometer is not None:
-            prev_odometer = _to_float(prev.get("odometer"))
-            if prev_odometer is not None:
-                distance = odometer - prev_odometer
-                if distance > 0:
+        if prev is not None:
+            prev_odo = _to_float(prev.get("odometer"))
+            if prev_odo is None:
+                problems.append(
+                    f"第 {idx} 条（{str(prev.get('date', ''))[:16]}）缺少"
+                    "里程表读数，其后区间的油耗无法计算，请补全或删除该记录"
+                )
+            elif odometer is None:
+                problems.append(
+                    f"第 {idx + 1} 条（{rec_date}）缺少里程表读数，"
+                    "该区间油耗无法计算，请补全或删除该记录"
+                )
+            else:
+                distance = odometer - prev_odo
+                if distance <= 0:
+                    problems.append(
+                        f"第 {idx + 1} 条（{rec_date}，里程 {odometer}）与"
+                        f"第 {idx} 条（{str(prev.get('date', ''))[:16]}，"
+                        f"里程 {prev_odo}）时间顺序与里程顺序不符"
+                        f"（区间里程 {round(distance, 1)} km），请修正"
+                    )
+                elif distance > max_segment_km:
+                    problems.append(
+                        f"第 {idx + 1} 条（{rec_date}，里程 {odometer}）与"
+                        f"第 {idx} 条（{str(prev.get('date', ''))[:16]}，"
+                        f"里程 {prev_odo}）区间里程 {round(distance, 1)} km "
+                        f"超过 {max_segment_km:g} km 上限，请核对里程或时间"
+                    )
+                else:
                     record_distance += distance
                     last_distance = round(distance, 1)
                     last_consumption = round(volume / distance * 100, 2)
                     consumption_volumes += volume
         prev = rec
 
+    # 【必须修正才能算】存在问题 → 油耗类指标不可用
+    if problems:
+        last_consumption = None
+        last_distance = None
+        consumption_volumes = 0.0
+
     last_odometer = _to_float(sorted_records[-1].get("odometer"))
 
     # 累计行驶里程：优先使用初始里程基准
     if last_odometer is not None and initial_odometer is not None:
         total_distance = max(last_odometer - initial_odometer, 0.0)
+    elif problems:
+        # 里程链不完整时区间和不可信
+        total_distance = None
     elif last_odometer is not None and last_distance is not None:
         # 无初始里程：最后一段里程可视为近似（最后记录里程 - 上次记录里程之和）
         total_distance = record_distance
@@ -128,6 +171,7 @@ def compute_stats(
                 else None
             ),
             "last_record_date": sorted_records[-1].get("date"),
+            "quality_problems": problems,
         }
     )
     return stats

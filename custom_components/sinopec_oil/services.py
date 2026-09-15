@@ -168,6 +168,78 @@ def _get_store(hass: HomeAssistant):
     return store
 
 
+MAX_SEGMENT_KM = 900.0  # 每次加油区间的合理里程上限（超限视为里程/时间不符）
+
+
+def _validate_segment_order(
+    store,
+    vehicle: str,
+    new_odometer: float | None,
+    new_date: str,
+    exclude_date: str | None = None,
+) -> None:
+    """校验新记录插入时间序后与前后记录的里程一致性（阻止入库）。
+
+    【必须修正才能算】：时间与里程不对应（区间里程 ≤ 0 或 > 900 km）
+    的记录不允许写入，须修正后重试。edit 场景通过 exclude_date
+    排除被编辑记录本身，只校验其与前后邻居的区间。
+    """
+    if new_odometer is None:
+        raise HomeAssistantError(
+            "里程表读数（odometer）不能为空：油耗计算要求每条记录都有"
+            "里程读数，请补充后重试。"
+        )
+
+    records = store.get_records_sorted(vehicle)
+    if exclude_date is not None:
+        records = [
+            r for r in records if str(r.get("date", "")) != exclude_date
+        ]
+
+    prev = None
+    nxt = None
+    for rec in records:
+        rec_date = str(rec.get("date", ""))
+        if rec_date <= new_date:
+            prev = rec
+        else:
+            nxt = rec
+            break
+
+    if prev is not None:
+        prev_odo = _to_float(prev.get("odometer"))
+        if prev_odo is not None:
+            diff = new_odometer - prev_odo
+            if diff <= 0:
+                raise HomeAssistantError(
+                    f"时间顺序与里程不一致：{new_date} 的里程 {new_odometer} "
+                    f"不大于 {prev.get('date')} 的 {prev_odo}（相邻加油区间"
+                    "里程必须为正）。请修正里程或时间后重试，本次未保存。"
+                )
+            if diff > MAX_SEGMENT_KM:
+                raise HomeAssistantError(
+                    f"区间里程超限：{new_date} 与 {prev.get('date')} 之间"
+                    f"相差 {round(diff, 1)} km，超过单次加油区间 {MAX_SEGMENT_KM:g} km "
+                    "上限。请核对里程表读数或加油时间，本次未保存。"
+                )
+    if nxt is not None:
+        nxt_odo = _to_float(nxt.get("odometer"))
+        if nxt_odo is not None:
+            diff = nxt_odo - new_odometer
+            if diff <= 0:
+                raise HomeAssistantError(
+                    f"时间顺序与里程不一致：{nxt.get('date')} 的里程 {nxt_odo} "
+                    f"不大于本次（{new_date}）的 {new_odometer}（历史补录需保持"
+                    "时间与里程同步递增）。请修正后重试，本次未保存。"
+                )
+            if diff > MAX_SEGMENT_KM:
+                raise HomeAssistantError(
+                    f"区间里程超限：{nxt.get('date')} 与本次（{new_date}）之间"
+                    f"相差 {round(diff, 1)} km，超过 {MAX_SEGMENT_KM:g} km 上限。"
+                    "请核对里程或时间，本次未保存。"
+                )
+
+
 def _get_runtime_datas(hass: HomeAssistant) -> list[SinopecOilRuntimeData]:
     """Return runtime data of all loaded entries."""
     return [
@@ -313,14 +385,6 @@ async def _async_build_record(
             )
 
     odometer = data.get(ATTR_ODOMETER)
-    if odometer is None and hass is not None:
-        # 未填里程时沿用上次读数（或初始里程），保证里程链完整可算油耗
-        try:
-            odometer = _get_store(hass).get_current_odometer(
-                str(data.get(ATTR_VEHICLE, "")).strip()
-            )
-        except Exception:  # noqa: BLE001 - 兜底，里程补全失败不阻断记录
-            odometer = None
 
     return {
         "date": when.isoformat(timespec="seconds"),
@@ -371,6 +435,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         record = await _async_build_record(
             call.hass, data, vehicle_info, runtime
+        )
+        # 【必须修正才能算】时间-里程一致性校验，不通过则阻止入库
+        _validate_segment_order(
+            store, vehicle, record["odometer"], record["date"]
         )
         result = await store.async_add_record(vehicle, record)
 
@@ -425,11 +493,22 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             key=lambda r: str(r.get(ATTR_DATE) or ""),
         )
         imported = 0
+        rejected: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
         for item in records:
             record = await _async_build_record(
                 call.hass, dict(item), vehicle_info, runtime
             )
+            # 【必须修正才能算】逐行校验，冲突行拒绝并报告原因（其余行正常导入）
+            try:
+                _validate_segment_order(
+                    store, vehicle, record["odometer"], record["date"]
+                )
+            except HomeAssistantError as err:
+                rejected.append(
+                    {"date": record["date"], "reason": str(err)}
+                )
+                continue
             await store.async_add_record(vehicle, record)
             imported += 1
             results.append(
@@ -446,8 +525,18 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             call.hass.async_create_task(
                 rt.refuel_coordinator.async_request_refresh()
             )
-        _LOGGER.info("批量导入加油记录：%s 共 %d 条", vehicle, imported)
-        return {"vehicle": vehicle, "imported": imported, "records": results}
+        _LOGGER.info(
+            "批量导入加油记录：%s 成功 %d 条，拒绝 %d 条",
+            vehicle,
+            imported,
+            len(rejected),
+        )
+        return {
+            "vehicle": vehicle,
+            "imported": imported,
+            "rejected": rejected,
+            "records": results,
+        }
 
     async def async_handle_add_vehicle(
         call: ServiceCall,
@@ -575,6 +664,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         new_record = await _async_build_record(
             call.hass, merged, vehicle_info, runtime
+        )
+        # 【必须修正才能算】编辑后的记录与其前后邻居区间校验
+        # （排除原记录本身；其余既有问题不阻止本次修正）
+        _validate_segment_order(
+            store,
+            vehicle,
+            new_record["odometer"],
+            new_record["date"],
+            exclude_date=str(original.get(ATTR_DATE, "")),
         )
         updated = await store.async_replace_record(vehicle, index, new_record)
         for rt in _get_runtime_datas(call.hass):
