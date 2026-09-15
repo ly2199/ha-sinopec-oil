@@ -169,3 +169,127 @@ clear_vehicle:
 refresh_oil_price:
   name: 刷新油价
   description: 立即从中石化网站刷新所有已配置位置的油价数据。
+
+list_refuel_records:
+  name: 查看加油记录
+  description: >-
+    按时间升序列出某辆车的全部加油记录（每条带 index 序号与计价来源），
+    返回结果同时包含最新统计。index 用于 delete/edit_refuel_record 定位。
+  fields:
+    vehicle:
+      name: 车辆
+      description: 要查看记录的车辆名称/标识。
+      required: true
+      example: 我的 car
+      selector:
+        text:
+
+delete_refuel_record:
+  name: 删除加油记录
+  description: 按序号删除一条加油记录，统计随之重算。序号可先用"查看加油记录"获取。
+  fields:
+    vehicle:
+      name: 车辆
+      description: 记录所属的车辆名称/标识。
+      required: true
+      example: 我的 car
+      selector:
+        text:
+    index:
+      name: 记录序号
+      description: 要删除的记录序号（"查看加油记录"返回的 index，从 0 开始，按日期升序）。
+      required: true
+      example: 3
+      selector:
+        number:
+          min: 0
+          max: 100000
+          mode: box
+
+edit_refuel_record:
+  name: 修改加油记录
+  description: >-
+    按序号修改一条加油记录，只填要改的字段。智能重算：只改加油量 → 按记录日期
+    的油价重算费用；只改费用 → 重算加油量；量与费同时给 → 单价=费用/加油量。
+  fields:
+    vehicle:
+      name: 车辆
+      description: 记录所属的车辆名称/标识。
+      required: true
+      example: 我的 car
+      selector:
+        text:
+    index:
+      name: 记录序号
+      description: 要修改的记录序号（"查看加油记录"返回的 index）。
+      required: true
+      example: 3
+      selector:
+        number:
+          min: 0
+          max: 100000
+          mode: box
+    odometer:
+      name: 里程表读数
+      description: 修改为该里程表读数（公里）。不填则保持不变。
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 10000000
+          step: 0.1
+          unit_of_measurement: km
+          mode: box
+    volume:
+      name: 加油量
+      description: 修改为该加油量（升）。只填此项时按记录日期油价重算费用。
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 0.01
+          unit_of_measurement: L
+          mode: box
+    total_cost:
+      name: 加油总费用
+      description: 修改为该费用（元）。只填此项时按记录日期油价重算加油量。
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100000
+          step: 0.01
+          unit_of_measurement: 元
+          mode: box
+    price:
+      name: 油品单价
+      description: 直接指定单价（元/L）覆盖自动计算。
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 0.01
+          unit_of_measurement: 元/L
+          mode: box
+    date:
+      name: 加油时间
+      description: 修改加油时间。时间变更后按新日期重新匹配历史油价。
+      required: false
+      selector:
+        datetime:
+    note:
+      name: 备注
+      description: 修改备注。
+      required: false
+      selector:
+        text:
+
+get_price_history:
+  name: 查询历史油价
+  description: >-
+    返回当前配置位置（省份/价区）的历史调价周期列表（约 24 期 ≈ 11 个月），
+    每期含起止日期与各油品价格。也可直接查看"油价更新时间"传感器的
+    price_history 属性。
+

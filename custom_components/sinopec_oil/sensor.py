@@ -229,11 +229,21 @@ class OilPriceUpdateSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Attributes incl. recent price-change history."""
         oil = self.coordinator.data
-        return {
+        attrs: dict[str, Any] = {
             "date": oil.to_day if oil else None,
             "location": oil.display_name if oil else None,
         }
+        if oil and oil.price_history:
+            # 历史调价周期（完整数据，最近 6 期在前的为当前与相邻周期）
+            attrs["price_history"] = oil.price_history
+            current = oil.price_history[0] if oil.price_history else None
+            if current:
+                attrs["current_period"] = (
+                    f"{current['start']} ~ {current['end']}"
+                )
+        return attrs
 
 
 def _vehicle_device(vehicle: str) -> DeviceInfo:

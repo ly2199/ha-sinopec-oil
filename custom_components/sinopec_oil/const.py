@@ -32,10 +32,14 @@ UNIT_YUAN_PER_KM: Final = "元/km"
 # --- 服务 ---
 SERVICE_RECORD_REFUEL: Final = "record_refuel"
 SERVICE_IMPORT_RECORDS: Final = "import_refuel_records"
+SERVICE_LIST_RECORDS: Final = "list_refuel_records"
+SERVICE_DELETE_RECORD: Final = "delete_refuel_record"
+SERVICE_EDIT_RECORD: Final = "edit_refuel_record"
 SERVICE_ADD_VEHICLE: Final = "add_vehicle"
 SERVICE_REMOVE_VEHICLE: Final = "remove_vehicle"
 SERVICE_CLEAR_VEHICLE: Final = "clear_vehicle_data"
 SERVICE_REFRESH_OIL_PRICE: Final = "refresh_oil_price"
+SERVICE_GET_PRICE_HISTORY: Final = "get_price_history"
 
 # --- 事件/信号 ---
 SIGNAL_VEHICLE_ADDED: Final = f"{DOMAIN}_vehicle_added"

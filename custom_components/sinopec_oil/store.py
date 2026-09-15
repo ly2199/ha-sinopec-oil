@@ -260,6 +260,59 @@ class RefuelStore:
             "stats": stats,
         }
 
+    def get_records_sorted(self, vehicle: str) -> list[dict[str, Any]]:
+        """Return records sorted by date (ascending), each tagged with `index`.
+
+        `index` 是排序后的序号，供 delete_refuel_record / edit_refuel_record
+        服务按序号定位记录。
+        """
+        records = sorted(
+            self.get_records(vehicle), key=lambda r: str(r.get("date", ""))
+        )
+        return [{**rec, "index": i} for i, rec in enumerate(records)]
+
+    def _records_by_date(self, vehicle: str) -> list[dict[str, Any]]:
+        """Internal: date-sorted references to the actual record dicts."""
+        return sorted(
+            self.vehicles.get(vehicle, {}).get("records", []),
+            key=lambda r: str(r.get("date", "")),
+        )
+
+    async def async_delete_record(
+        self, vehicle: str, index: int
+    ) -> dict[str, Any] | None:
+        """Delete the record at sorted `index`. Return the removed record."""
+        records_sorted = self._records_by_date(vehicle)
+        if index < 0 or index >= len(records_sorted):
+            return None
+        removed = records_sorted[index]
+        stored = self.vehicles.get(vehicle, {}).get("records", [])
+        for i, rec in enumerate(stored):
+            if rec is removed:
+                del stored[i]
+                break
+        await self._async_save()
+        return removed
+
+    async def async_replace_record(
+        self, vehicle: str, index: int, updates: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Replace the record at sorted `index` with `updates`.
+
+        `updates` 应为完整的新记录内容（由服务层智能重算后给出）。
+        返回替换后的记录；序号越界返回 None。
+        """
+        records_sorted = self._records_by_date(vehicle)
+        if index < 0 or index >= len(records_sorted):
+            return None
+        stored = self.vehicles.get(vehicle, {}).get("records", [])
+        for i, rec in enumerate(stored):
+            if rec is records_sorted[index]:
+                stored[i] = dict(updates)
+                break
+        await self._async_save()
+        return stored[i] if stored else None
+
     async def async_clear_vehicle(self, vehicle: str) -> bool:
         """Remove all records of a vehicle. Return True if it existed."""
         if vehicle not in self.vehicles:

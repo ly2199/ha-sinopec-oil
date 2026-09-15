@@ -10,9 +10,9 @@
       },
       "area": {
         "title": "选择价区",
-        "description": "该省份按价区发布油价，请选择你所在的价区。",
+        "description": "该省份按价区发布油价。下拉选项中已列出官方公布的适用州市与参考油价，请按你所在州市对照选择。",
         "data": {
-          "area": "价区"
+          "area": "价区（含适用州市说明）"
         }
       },
       "vehicle": {
@@ -43,6 +43,7 @@
           "edit_vehicle": "✏️ 编辑车辆（初始里程/默认油品）",
           "remove_vehicle": "🗑️ 删除车辆（含全部记录）",
           "clear_vehicle": "🧹 清空某辆车的加油记录",
+          "manage_records": "🧾 加油记录管理（查看/删除单条）",
           "done": "✅ 完成"
         }
       },
@@ -56,9 +57,9 @@
       },
       "area": {
         "title": "选择价区",
-        "description": "该省份按价区发布油价，请选择你所在的价区。",
+        "description": "该省份按价区发布油价。下拉选项中已列出官方公布的适用州市与参考油价，请按你所在州市对照选择。",
         "data": {
-          "area": "价区"
+          "area": "价区（含适用州市说明）"
         }
       },
       "add_vehicle": {
@@ -90,6 +91,14 @@
         "description": "清空该车辆的加油记录（保留车辆），统计将重新计算。",
         "data": {
           "vehicle": "选择要清空记录的车辆"
+        }
+      },
+      "manage_records": {
+        "title": "加油记录管理",
+        "description": "车辆：{vehicle}（共 {count} 条记录）。选择要删除的一条记录；如需修改记录内容，请使用 edit_refuel_record 服务。",
+        "data": {
+          "vehicle": "选择车辆",
+          "record_index": "选择要删除的记录"
         }
       },
       "done": {

@@ -1,6 +1,7 @@
 """Config flow for the Sinopec Oil Price integration."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -41,6 +42,8 @@ from .const import (
     UNIT_KM,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 PROVINCE_SELECTOR = SelectSelector(
     SelectSelectorConfig(
         options=[
@@ -77,10 +80,17 @@ FUEL_TYPE_SELECTOR = TextSelector(
 
 
 def _area_selector(areas: list[dict[str, Any]]) -> SelectSelector:
-    """Build an area selector showing name + sample price."""
+    """Build an area selector showing official coverage + reference price.
+
+    例："一价区 · 适用于：昆明（92号 8.44 元/L）"
+    适用州市说明（AREA_DESC）来自中石化接口，帮助用户判断该价区是否覆盖所在地。
+    """
     options = []
     for area in areas:
         label = area["name"]
+        desc = (area.get("desc") or "").strip()
+        if desc:
+            label += f" · {desc}"
         if area.get("sample_price") is not None:
             label += f"（{area.get('sample_label', '')} {area['sample_price']} 元/L）"
         options.append({"value": area["id"], "label": label})
@@ -247,6 +257,7 @@ class SinopecOilOptionsFlow(OptionsFlow):
         self._areas: list[dict[str, Any]] = []
         self._settings_ready = False
         self._vehicle_name: str | None = None
+        self._manage_vehicle: str | None = None
 
     # ------------------------------------------------------------------
     # 菜单
@@ -263,6 +274,7 @@ class SinopecOilOptionsFlow(OptionsFlow):
                 "edit_vehicle",
                 "remove_vehicle",
                 "clear_vehicle",
+                "manage_records",
                 "done",
             ],
         )
@@ -524,4 +536,81 @@ class SinopecOilOptionsFlow(OptionsFlow):
         )
         return self.async_show_form(
             step_id="clear_vehicle", data_schema=schema
+        )
+
+    async def async_step_manage_records(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Browse and delete individual refuel records of a vehicle."""
+        store = self._store()
+
+        # 第二阶段：选中记录并删除
+        if self._manage_vehicle is not None:
+            if user_input is not None and "record_index" in user_input:
+                index = int(user_input["record_index"])
+                removed = await store.async_delete_record(
+                    self._manage_vehicle, index
+                )
+                if removed is not None:
+                    _LOGGER.info(
+                        "已删除加油记录：车辆=%s %s",
+                        self._manage_vehicle,
+                        removed.get("date"),
+                    )
+            self._manage_vehicle = None
+            return await self.async_step_init()
+
+        # 第一阶段：选择车辆
+        if not self._vehicle_options():
+            return await self.async_step_init()
+        if user_input is not None and CONF_VEHICLE in user_input:
+            self._manage_vehicle = user_input[CONF_VEHICLE]
+            records = store.get_records_sorted(self._manage_vehicle)
+            if not records:
+                self._manage_vehicle = None
+                return await self.async_step_init()
+            options = []
+            for rec in records:
+                label = (
+                    f"{str(rec.get('date', ''))[:16]} · "
+                    f"{rec.get('volume', '?')} L · "
+                    f"{rec.get('total_cost', '?')} 元"
+                )
+                odometer = rec.get("odometer")
+                if odometer is not None:
+                    label += f" · {odometer} km"
+                options.append(
+                    {"value": str(rec["index"]), "label": label}
+                )
+            schema = vol.Schema(
+                {
+                    vol.Required("record_index"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=options,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            )
+            return self.async_show_form(
+                step_id="manage_records",
+                data_schema=schema,
+                description_placeholders={
+                    "vehicle": self._manage_vehicle,
+                    "count": str(len(records)),
+                },
+            )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_VEHICLE): SelectSelector(
+                    SelectSelectorConfig(
+                        options=self._vehicle_options(),
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="manage_records", data_schema=schema
         )

@@ -64,6 +64,9 @@ class OilPriceData:
     prices: dict[str, float] = field(default_factory=dict)
     changes: dict[str, float] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
+    # 历史调价周期（由 coordinator 附加填充）：
+    # [{start, end, prices: {中文油品名: 价格}}, ...]，按时间倒序
+    price_history: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def display_name(self) -> str:
@@ -350,13 +353,42 @@ class SinopecOilApiClient:
             )
         return None
 
+    def history_to_payload(
+        self, periods: list[HistoryPeriod]
+    ) -> list[dict[str, Any]]:
+        """Convert history periods to a JSON-friendly list with Chinese labels.
+
+        输出：[{start: "2026-09-12", end: "2026-09-24",
+                prices: {"92号汽油": 8.44, ...}}, ...]（按时间倒序）。
+        """
+        # 数据字段名 → 中文标签（OIL_TYPE_MAP 的键是开关键，需反向映射）
+        label_by_key = {
+            data_key: label for _, (data_key, label) in OIL_TYPE_MAP.items()
+        }
+        out: list[dict[str, Any]] = []
+        for period in periods:
+            prices: dict[str, float] = {}
+            for key, price in period.prices.items():
+                prices[label_by_key.get(key, key)] = price
+            out.append(
+                {
+                    "start": period.start.isoformat(),
+                    "end": period.end.isoformat(),
+                    "prices": prices,
+                }
+            )
+        return out
+
     # ------------------------------------------------------------------
     # 价区列表（供配置流选择）
     # ------------------------------------------------------------------
     async def async_list_areas(self) -> list[dict[str, Any]]:
         """Return the area list for the province.
 
-        [{id, name, sample_price(92号等基准油品价), sample_label}]
+        每项：{id, name, desc(官方适用州市说明), sample_label, sample_price,
+        prices(中文油品名 → 参考价)}。
+        AREA_DESC 来自中石化接口（如 "适用于：昆明"），用于价区选择时
+        告知用户该价区覆盖哪些州市。
         """
         async with self._request_lock:
             await self._init_session_and_switch()
@@ -369,16 +401,21 @@ class SinopecOilApiClient:
             check = area.get("areaCheck") or {}
             pdata = area.get("areaData") or {}
             sample_key, sample_price = None, None
+            prices: dict[str, float] = {}
             for _, (data_key, label) in OIL_TYPE_MAP.items():
                 if _is_valid_price(pdata.get(data_key)):
-                    sample_key, sample_price = label, pdata[data_key]
-                    break
+                    prices[label] = float(pdata[data_key])
+                    if sample_key is None:
+                        sample_key, sample_price = label, pdata[data_key]
+            desc = str(check.get("AREA_DESC") or "").strip() or None
             result.append(
                 {
                     "id": str(check.get("AREA_ID")),
                     "name": check.get("AREA_NAME") or str(check.get("AREA_ID")),
+                    "desc": desc,
                     "sample_label": sample_key,
                     "sample_price": sample_price,
+                    "prices": prices,
                 }
             )
         return result

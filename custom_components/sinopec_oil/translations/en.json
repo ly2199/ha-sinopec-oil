@@ -10,9 +10,9 @@
       },
       "area": {
         "title": "Select price area",
-        "description": "This province publishes prices per price area. Choose the one you are in.",
+        "description": "This province publishes prices per price area. Each option shows the official coverage (cities/prefectures) and reference prices — pick the one matching your location.",
         "data": {
-          "area": "Price area"
+          "area": "Price area (with coverage info)"
         }
       },
       "vehicle": {
@@ -30,7 +30,7 @@
       "invalid_data": "The oil price website returned invalid data."
     },
     "abort": {
-      "already_configured": "This province is already configured. Modify the existing entry instead."
+      "already_configured": "This province is already configured. Edit the existing entry instead."
     }
   },
   "options": {
@@ -40,15 +40,16 @@
         "menu_options": {
           "settings": "⚙️ Location & refresh settings",
           "add_vehicle": "🚗 Add vehicle",
-          "edit_vehicle": "✏️ Edit vehicle (initial odometer / default fuel)",
+          "edit_vehicle": "✏️ Edit vehicle (initial odometer / fuel)",
           "remove_vehicle": "🗑️ Remove vehicle (with all records)",
-          "clear_vehicle": "🧹 Clear a vehicle's refuel records",
+          "clear_vehicle": "🧹 Clear refuel records of a vehicle",
+          "manage_records": "🧾 Manage refuel records (view / delete)",
           "done": "✅ Done"
         }
       },
       "settings": {
         "title": "Location & refresh settings",
-        "description": "Change the oil price location or refresh interval.",
+        "description": "Change the oil price location or refresh frequency.",
         "data": {
           "province": "Oil price location (province / municipality / region)",
           "scan_interval": "Oil price refresh interval (minutes)"
@@ -56,9 +57,9 @@
       },
       "area": {
         "title": "Select price area",
-        "description": "This province publishes prices per price area. Choose the one you are in.",
+        "description": "This province publishes prices per price area. Each option shows the official coverage (cities/prefectures) and reference prices — pick the one matching your location.",
         "data": {
-          "area": "Price area"
+          "area": "Price area (with coverage info)"
         }
       },
       "add_vehicle": {
@@ -90,6 +91,14 @@
         "description": "Clear all refuel records of the vehicle (vehicle is kept); statistics will be recalculated.",
         "data": {
           "vehicle": "Select the vehicle to clear"
+        }
+      },
+      "manage_records": {
+        "title": "Manage refuel records",
+        "description": "Vehicle: {vehicle} ({count} records). Pick a record to delete. To modify a record, use the edit_refuel_record service.",
+        "data": {
+          "vehicle": "Select vehicle",
+          "record_index": "Select the record to delete"
         }
       },
       "done": {

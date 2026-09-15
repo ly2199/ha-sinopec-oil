@@ -42,11 +42,20 @@ class SinopecOilPriceCoordinator(DataUpdateCoordinator[OilPriceData]):
         self.client = client
 
     async def _async_update_data(self) -> OilPriceData:
-        """Fetch the latest oil prices."""
+        """Fetch the latest oil prices (plus price history, best effort)."""
         try:
-            return await self.client.async_get_oil_prices()
+            data = await self.client.async_get_oil_prices()
         except SinopecOilApiClientError as err:
             raise UpdateFailed(f"获取油价失败: {err}") from err
+
+        # 历史调价周期：客户端带 TTL 缓存，失败不影响当日油价更新
+        try:
+            periods = await self.client.async_get_price_history()
+            data.price_history = self.client.history_to_payload(periods)
+        except SinopecOilApiClientError as err:
+            _LOGGER.debug("获取历史油价失败（不影响当前油价）: %s", err)
+
+        return data
 
 
 class RefuelStatsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
