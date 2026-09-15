@@ -220,13 +220,6 @@ sinopec_oil.refresh_oil_price:  # 立即刷新油价
 
 ---
 
-## 仓库与发布
-
-- GitHub：<https://github.com/ly2199/ha-sinopec-oil>
-- 版本发布：通过 Release 打标签（HACS 用户据此看到版本选择），如 `gh release create v1.0.0 --title "v1.0.0" --notes "版本说明"`
-
----
-
 ## 数据来源与接口
 
 数据抓取自中国石化公开的"今日油价"页面：
