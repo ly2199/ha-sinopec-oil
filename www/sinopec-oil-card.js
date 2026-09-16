@@ -3,7 +3,7 @@
  *
  * 安装：将本文件复制到 /config/www/sinopec-oil-card.js，然后在
  * 仪表盘 → 右上角 ⋮ → 管理资源 → 添加
- *   URL: /local/sinopec-oil-card.js   版本: 1.0.3
+ *   URL: /local/sinopec-oil-card.js   版本: 1.1.0
  * 使用：仪表盘添加卡片 → 手动 →
  *   type: custom:sinopec-oil-card
  * 可选: title: 我的油卡   vehicle: 某辆车（不填则记住上次选择）
@@ -12,6 +12,9 @@
  * 无需填写任何实体 ID。
  *
  * 页签：加油 · 历史 · 油价 · 统计
+ * 1.1.0 界面重构：容器查询自适应布局（按卡片实际宽度而非屏幕）、
+ *       分段式页签、分区表单、统计/油价磁贴、表格圆角化 + 行悬浮 +
+ *       数字右对齐、提交按钮回车快捷键；功能与数据口径完全不变。
  * 规则：区间油耗由相邻里程差算出（0 < Δ ≤ 900 km）。
  * 里程可留空 → 该区间记为「缺口」不参与油耗统计，不影响其他区间；
  * 时间与里程矛盾（Δ ≤ 0 或与紧邻记录 Δ > 900 km）的记录会被拒绝入库。
@@ -30,71 +33,358 @@
 
   const CARD_CSS = `
     :host { display: block; }
-    ha-card { overflow: hidden; }
-    .card { padding: 12px 16px 16px; }
-    .header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
-    .title { display: flex; align-items: center; gap: 6px; font-size: 1.1em; font-weight: 600;
-             color: var(--primary-text-color); }
-    .title ha-icon { color: var(--primary-color); --mdc-icon-size: 22px; }
-    .tabs { display: flex; gap: 4px; margin: 10px 0 12px; flex-wrap: wrap; }
-    .tab { display: flex; align-items: center; gap: 4px; padding: 5px 12px; border-radius: 16px;
-           cursor: pointer; font-size: 0.9em; color: var(--secondary-text-color);
-           background: var(--secondary-background-color); }
-    .tab ha-icon { --mdc-icon-size: 16px; }
-    .tab.active { color: var(--text-primary-color); background: var(--primary-color); font-weight: 600; }
-    .row { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
-    .field { display: flex; flex-direction: column; flex: 1 1 120px; min-width: 110px; }
-    .field label { font-size: 0.78em; color: var(--secondary-text-color); margin-bottom: 2px; }
-    .field input, .field select, textarea, select.vehicle {
-      width: 100%; box-sizing: border-box; padding: 6px 8px;
-      border: 1px solid var(--divider-color); border-radius: 6px;
-      background: var(--card-background-color); color: var(--primary-text-color); font-size: 0.95em; }
-    select.vehicle { width: auto; padding: 4px 8px; border-radius: 6px; }
-    textarea { min-height: 90px; font-family: monospace; }
-    .btn { display: inline-flex; align-items: center; gap: 4px; padding: 8px 18px; border: none;
-           border-radius: 18px; cursor: pointer; font-size: 0.95em; background: var(--primary-color);
-           color: var(--text-primary-color); font-weight: 600; }
+
+    /* ---------- 卡片骨架：顶部渐变点缀 + 容器查询（按卡片实际宽度自适应） ---------- */
+    ha-card { position: relative; overflow: hidden; container-type: inline-size; }
+    ha-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 3px;
+      background: linear-gradient(90deg,
+        var(--primary-color) 0%,
+        color-mix(in srgb, var(--primary-color) 35%, transparent) 55%,
+        transparent 100%);
+    }
+    .card { padding: 18px 22px 22px; }
+
+    /* ---------- 头部 ---------- */
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px 14px; flex-wrap: wrap; margin-bottom: 14px;
+    }
+    .title {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 1.18em; font-weight: 700; letter-spacing: .3px;
+      color: var(--primary-text-color);
+    }
+    .title-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 36px; height: 36px; flex: none; border-radius: 11px;
+      color: var(--primary-color);
+      background: rgba(128,128,128,.12);
+      background: color-mix(in srgb, var(--primary-color) 15%, transparent);
+    }
+    .title-icon ha-icon { --mdc-icon-size: 22px; }
+
+    .vehicle-wrap {
+      display: inline-flex; align-items: center; gap: 7px; height: 38px;
+      padding: 0 7px 0 13px; border: 1px solid var(--divider-color);
+      border-radius: 999px; background: var(--secondary-background-color);
+      cursor: pointer; transition: border-color .2s, box-shadow .2s;
+    }
+    .vehicle-wrap:hover, .vehicle-wrap:focus-within {
+      border-color: var(--primary-color);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 15%, transparent);
+    }
+    .vehicle-wrap ha-icon { --mdc-icon-size: 18px; color: var(--primary-color); }
+    .vehicle-wrap .chev { color: var(--secondary-text-color); }
+    select.vehicle {
+      appearance: none; -webkit-appearance: none;
+      border: none; background: transparent; color: var(--primary-text-color);
+      font: inherit; font-size: .88em; font-weight: 600;
+      height: 100%; padding: 0; max-width: 180px;
+      cursor: pointer; outline: none;
+    }
+
+    /* ---------- 页签：分段式控制器 ---------- */
+    .tabs {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px;
+      margin: 2px 0 18px; padding: 4px;
+      background: var(--secondary-background-color); border-radius: 13px;
+    }
+    .tab {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 9px 6px; border-radius: 9px; cursor: pointer;
+      font-size: .88em; font-weight: 500; color: var(--secondary-text-color);
+      transition: color .2s, background-color .2s, box-shadow .2s;
+      user-select: none; white-space: nowrap;
+    }
+    .tab ha-icon { --mdc-icon-size: 17px; }
+    .tab:hover { color: var(--primary-text-color); }
+    .tab.active {
+      color: var(--text-primary-color); background: var(--primary-color);
+      font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,.16);
+    }
+
+    /* ---------- 表单：自适应网格（窄卡片自动降列数） ---------- */
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
+      gap: 12px 14px;
+    }
+    .field { display: flex; flex-direction: column; min-width: 0; }
+    .field label {
+      font-size: .78em; font-weight: 600; letter-spacing: .2px;
+      color: var(--secondary-text-color);
+      margin-bottom: 6px; line-height: 1.4;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .field .sub {
+      font-size: .72em; color: var(--secondary-text-color);
+      margin-top: 4px; line-height: 1.45;
+    }
+    .field input, .field select, textarea {
+      width: 100%; box-sizing: border-box; min-height: 42px;
+      padding: 9px 12px;
+      border: 1px solid var(--divider-color); border-radius: 10px;
+      background: var(--card-background-color); color: var(--primary-text-color);
+      font: inherit; font-size: .95em;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    .field input:hover, .field select:hover, textarea:hover {
+      border-color: color-mix(in srgb, var(--primary-color) 45%, var(--divider-color));
+    }
+    .field input:focus, .field select:focus, textarea:focus {
+      outline: none; border-color: var(--primary-color);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 16%, transparent);
+    }
+    .field input::placeholder, textarea::placeholder {
+      color: color-mix(in srgb, var(--secondary-text-color) 75%, transparent);
+    }
+    textarea {
+      min-height: 120px; resize: vertical; border-radius: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: .88em; line-height: 1.6;
+    }
+
+    /* ---------- 按钮 ---------- */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      padding: 10px 22px; border: none; border-radius: 12px; cursor: pointer;
+      font: inherit; font-size: .92em; font-weight: 600; letter-spacing: .3px;
+      background: var(--primary-color); color: var(--text-primary-color);
+      box-shadow: 0 2px 8px color-mix(in srgb, var(--primary-color) 32%, transparent);
+      transition: box-shadow .2s, transform .15s, background-color .2s,
+                  border-color .2s, color .2s, opacity .2s;
+    }
     .btn ha-icon { --mdc-icon-size: 18px; }
-    .btn:disabled { opacity: .5; cursor: default; }
-    .btn.secondary { background: var(--secondary-background-color); color: var(--primary-text-color); }
-    .btn.danger { background: var(--error-color, #db4437); color: #fff; }
-    .msg { display: flex; gap: 8px; margin: 10px 0; padding: 10px 12px; border-radius: 8px; font-size: 0.9em; }
-    .msg ha-icon { flex: none; --mdc-icon-size: 20px; margin-top: 1px; }
-    .msg.ok { background: rgba(76,175,80,.12); color: var(--success-color, #2e7d32); }
-    .msg.err { background: rgba(219,68,55,.10); color: var(--error-color, #db4437); }
-    .msg.warn { background: rgba(255,152,0,.12); color: var(--warning-color, #ef6c00); }
-    .msg.info { background: var(--secondary-background-color); color: var(--primary-text-color); }
-    .msg b { display: block; margin-bottom: 4px; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
-    th { text-align: left; color: var(--secondary-text-color); font-weight: 500; white-space: nowrap;
-         border-bottom: 1px solid var(--divider-color); padding: 4px 6px; }
-    td { padding: 5px 6px; border-bottom: 1px solid var(--divider-color); color: var(--primary-text-color); }
+    .btn:hover:not(:disabled) {
+      box-shadow: 0 4px 16px color-mix(in srgb, var(--primary-color) 45%, transparent);
+    }
+    .btn:active:not(:disabled) { transform: translateY(1px); }
+    .btn:disabled { opacity: .55; cursor: default; }
+    .btn.secondary {
+      background: transparent; color: var(--primary-text-color);
+      border: 1px solid var(--divider-color); box-shadow: none;
+    }
+    .btn.secondary:hover:not(:disabled) {
+      border-color: var(--primary-color); color: var(--primary-color);
+      background: color-mix(in srgb, var(--primary-color) 7%, transparent); box-shadow: none;
+    }
+    .btn.danger {
+      background: var(--error-color, #db4437); color: #fff;
+      box-shadow: 0 2px 8px color-mix(in srgb, var(--error-color, #db4437) 30%, transparent);
+    }
+    .btn.danger:hover:not(:disabled) {
+      box-shadow: 0 4px 16px color-mix(in srgb, var(--error-color, #db4437) 45%, transparent);
+    }
+    .btn.mini { padding: 6px 14px; font-size: .78em; border-radius: 9px; box-shadow: none; }
+    .btn-lg { padding: 12px 28px; font-size: .98em; border-radius: 13px; }
+
+    /* ---------- 表格内的小图标按钮 ---------- */
+    .actions { display: inline-flex; gap: 6px; }
+    .icon-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 30px; height: 30px; flex: none;
+      border: 1px solid var(--divider-color); border-radius: 9px;
+      background: var(--card-background-color); color: var(--secondary-text-color);
+      cursor: pointer;
+      transition: color .2s, border-color .2s, background-color .2s;
+    }
+    .icon-btn ha-icon { --mdc-icon-size: 16px; }
+    .icon-btn:hover { color: var(--primary-color); border-color: var(--primary-color); }
+    .icon-btn.danger:hover {
+      color: var(--error-color, #db4437); border-color: var(--error-color, #db4437);
+      background: color-mix(in srgb, var(--error-color, #db4437) 8%, transparent);
+    }
+
+    /* ---------- 提示条 ---------- */
+    .msg {
+      display: flex; gap: 10px; margin: 12px 0; padding: 12px 14px;
+      border-radius: 12px; border: 1px solid transparent; border-left-width: 3px;
+      font-size: .86em; line-height: 1.65;
+    }
+    .msg ha-icon { flex: none; --mdc-icon-size: 19px; margin-top: 2px; }
+    .msg b { display: block; margin-bottom: 4px; font-weight: 700; }
+    .msg.ok { background: rgba(76,175,80,.10); color: var(--success-color, #2e7d32); border-left-color: var(--success-color, #2e7d32); }
+    .msg.err { background: rgba(219,68,55,.08); color: var(--error-color, #db4437); border-left-color: var(--error-color, #db4437); }
+    .msg.warn { background: rgba(255,152,0,.10); color: var(--warning-color, #ef6c00); border-left-color: var(--warning-color, #ef6c00); }
+    .msg.info { background: var(--secondary-background-color); color: var(--primary-text-color); border-left-color: var(--divider-color); }
+
+    /* ---------- 表格：圆角容器 + 行悬浮 + 数字右对齐 ---------- */
+    .table-wrap {
+      overflow-x: auto; margin: 12px 0 4px;
+      border: 1px solid var(--divider-color); border-radius: 12px;
+      background: var(--card-background-color);
+    }
+    table { width: 100%; border-collapse: collapse; font-size: .84em; }
+    th {
+      text-align: left; white-space: nowrap;
+      padding: 10px 12px;
+      color: var(--secondary-text-color); font-weight: 600; font-size: .95em;
+      background: var(--secondary-background-color);
+      border-bottom: 1px solid var(--divider-color);
+    }
+    td {
+      padding: 9px 12px; vertical-align: middle;
+      border-bottom: 1px solid var(--divider-color);
+      border-bottom-color: color-mix(in srgb, var(--divider-color) 50%, transparent);
+      color: var(--primary-text-color);
+    }
     tr:last-child td { border-bottom: none; }
+    tbody tr { transition: background-color .15s; }
+    tbody tr:hover td { background: color-mix(in srgb, var(--primary-color) 4%, transparent); }
+    .num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .period { white-space: nowrap; }
+    .note-cell { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .muted { color: var(--secondary-text-color); }
     .up { color: var(--error-color, #d32f2f); }
     .down { color: var(--success-color, #2e7d32); }
-    .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 0.78em;
-            background: var(--secondary-background-color); color: var(--secondary-text-color); }
-    .pill.good { background: rgba(76,175,80,.15); color: var(--success-color, #2e7d32); }
+
+    /* ---------- 统计 / 油价磁贴 ---------- */
+    .grid {
+      display: grid; gap: 10px; margin: 12px 0;
+      grid-template-columns: repeat(auto-fill, minmax(min(148px, 100%), 1fr));
+    }
+    .stat {
+      padding: 14px; border-radius: 14px;
+      background: var(--secondary-background-color);
+      border: 1px solid var(--divider-color);
+      border-color: color-mix(in srgb, var(--divider-color) 60%, transparent);
+      transition: transform .2s, box-shadow .2s, border-color .2s;
+    }
+    .stat:hover {
+      transform: translateY(-2px);
+      border-color: color-mix(in srgb, var(--primary-color) 35%, transparent);
+      box-shadow: 0 8px 20px rgba(0,0,0,.08);
+    }
+    .stat-icon { display: inline-flex; margin-bottom: 8px; color: var(--primary-color); opacity: .85; }
+    .stat-icon ha-icon { --mdc-icon-size: 20px; }
+    .stat .v {
+      font-size: 1.3em; font-weight: 700; letter-spacing: .2px;
+      color: var(--primary-text-color); font-variant-numeric: tabular-nums;
+    }
+    .stat .k { font-size: .74em; font-weight: 500; color: var(--secondary-text-color); margin-top: 3px; }
+    .stat .d { font-size: .78em; font-weight: 600; margin-top: 4px; color: var(--secondary-text-color); }
+    .stat .d.up { color: var(--error-color, #d32f2f); }
+    .stat .d.down { color: var(--success-color, #2e7d32); }
+    .stat.wide {
+      grid-column: 1 / -1;
+      display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+      background: var(--primary-color);
+      background: linear-gradient(120deg,
+        var(--primary-color),
+        color-mix(in srgb, var(--primary-color) 78%, #000));
+      border-color: transparent;
+    }
+    .stat.wide:hover {
+      transform: none; border-color: transparent;
+      box-shadow: 0 8px 20px color-mix(in srgb, var(--primary-color) 35%, transparent);
+    }
+    .stat.wide .stat-icon { color: var(--text-primary-color); opacity: .95; margin-bottom: 0; }
+    .stat.wide .v { color: var(--text-primary-color); font-size: 1.5em; }
+    .stat.wide .v .unit { font-size: .5em; font-weight: 500; opacity: .85; margin-left: 4px; }
+    .stat.wide .k { color: var(--text-primary-color); opacity: .85; margin-top: 0; font-size: .8em; }
+
+    .pill {
+      display: inline-block; padding: 2px 11px; border-radius: 999px;
+      font-size: .78em; font-weight: 600;
+      background: var(--secondary-background-color); color: var(--secondary-text-color);
+    }
+    .pill.good { background: rgba(76,175,80,.14); color: var(--success-color, #2e7d32); }
     .pill.bad { background: rgba(219,68,55,.12); color: var(--error-color, #db4437); }
-    .pill.up { background: rgba(219,68,55,.12); }
-    .pill.down { background: rgba(76,175,80,.15); }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 10px 0; }
-    .stat { padding: 10px; border-radius: 10px; background: var(--secondary-background-color); }
-    .stat .v { font-size: 1.25em; font-weight: 600; color: var(--primary-text-color); }
-    .stat .k { font-size: 0.75em; color: var(--secondary-text-color); margin-top: 2px; }
-    .stat .d { font-size: 0.78em; margin-top: 2px; color: var(--secondary-text-color); }
-    .bar-wrap { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 0.8em; }
-    .bar-label { width: 62px; color: var(--secondary-text-color); text-align: right; flex: none; }
-    .bar-track { flex: 1; background: var(--secondary-background-color); border-radius: 4px; height: 14px; overflow: hidden; }
-    .bar-fill { height: 100%; background: var(--primary-color); border-radius: 4px; }
-    .bar-val { width: 56px; flex: none; color: var(--primary-text-color); }
-    .hint { font-size: 0.78em; color: var(--secondary-text-color); margin: 6px 0; line-height: 1.5; }
-    .actions { display: flex; gap: 6px; }
-    .actions .btn { padding: 3px 10px; font-size: 0.8em; }
-    .editbox { background: var(--secondary-background-color); border-radius: 10px; padding: 10px; margin: 6px 0; }
-    .empty { text-align: center; color: var(--secondary-text-color); padding: 18px 0; }
-    .flexright { display: flex; justify-content: flex-end; margin-top: 8px; gap: 8px; }
+    .pill.up { background: rgba(219,68,55,.12); color: var(--error-color, #db4437); }
+    .pill.down { background: rgba(76,175,80,.14); color: var(--success-color, #2e7d32); }
+
+    /* ---------- 油价页签元信息 ---------- */
+    .meta {
+      display: flex; flex-wrap: wrap; align-items: center;
+      gap: 6px 18px; margin: 12px 0 2px;
+      font-size: .8em; color: var(--secondary-text-color);
+    }
+    .meta b { color: var(--primary-text-color); }
+
+    /* ---------- 走势条形图 ---------- */
+    .chart { margin-top: 14px; }
+    .bar-wrap { display: flex; align-items: center; gap: 10px; margin: 4px 0; font-size: .8em; }
+    .bar-label { width: 58px; flex: none; text-align: right; color: var(--secondary-text-color); font-variant-numeric: tabular-nums; }
+    .bar-track { flex: 1; height: 16px; border-radius: 999px; background: var(--secondary-background-color); overflow: hidden; }
+    .bar-fill {
+      height: 100%; border-radius: 999px;
+      background: var(--primary-color);
+      background: linear-gradient(90deg, color-mix(in srgb, var(--primary-color) 50%, transparent), var(--primary-color));
+      transition: width .5s ease;
+    }
+    .bar-val { width: 58px; flex: none; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--primary-text-color); }
+
+    /* ---------- 编辑 / 导入面板 ---------- */
+    .editbox {
+      background: var(--secondary-background-color);
+      background: color-mix(in srgb, var(--primary-color) 4%, var(--secondary-background-color));
+      border: 1px solid var(--divider-color);
+      border-color: color-mix(in srgb, var(--primary-color) 18%, var(--divider-color));
+      border-radius: 14px; padding: 14px; margin: 10px 0;
+    }
+    .editbox-title {
+      display: flex; align-items: center; gap: 8px;
+      font-size: .86em; font-weight: 600; color: var(--primary-text-color);
+      margin-bottom: 12px;
+    }
+    .editbox-title ha-icon { --mdc-icon-size: 17px; color: var(--primary-color); }
+    tr.editing td {
+      background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+      border-top: 1px solid color-mix(in srgb, var(--primary-color) 30%, transparent);
+      border-bottom: 1px solid color-mix(in srgb, var(--primary-color) 30%, transparent);
+    }
+
+    .empty {
+      text-align: center; color: var(--secondary-text-color);
+      padding: 34px 16px; font-size: .9em; line-height: 1.8;
+    }
+    .empty ha-icon {
+      --mdc-icon-size: 42px; display: block; margin: 0 auto 10px;
+      opacity: .35; color: var(--primary-color);
+    }
+    .flexright {
+      display: flex; justify-content: flex-end; align-items: center;
+      gap: 10px; margin-top: 14px; flex-wrap: wrap;
+    }
+    .hint { font-size: .8em; color: var(--secondary-text-color); margin: 8px 0; line-height: 1.75; }
+    .hint b { color: var(--primary-text-color); }
+    .hint code {
+      background: rgba(128,128,128,.14);
+      background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+      padding: 1px 6px; border-radius: 5px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+    }
+    .tips {
+      margin-top: 14px; padding: 11px 14px; border-radius: 12px;
+      background: var(--secondary-background-color);
+      font-size: .8em; color: var(--secondary-text-color); line-height: 1.8;
+    }
+    .tips b { color: var(--primary-text-color); }
+
+    .spin { display: inline-flex; animation: soc-rot 1s linear infinite; }
+    @keyframes soc-rot { to { transform: rotate(360deg); } }
+
+    /* ---------- 自适应：按卡片实际宽度（容器查询，而非屏幕宽度） ---------- */
+    @container (max-width: 620px) {
+      .card { padding: 14px 14px 16px; }
+      .title { font-size: 1.08em; gap: 8px; }
+      .title-icon { width: 32px; height: 32px; border-radius: 9px; }
+      .title-icon ha-icon { --mdc-icon-size: 20px; }
+      .flexright > .btn { flex: 1 1 auto; }
+      .bar-label, .bar-val { width: 50px; }
+    }
+    @container (max-width: 430px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .tab { gap: 4px; font-size: .82em; }
+      .stat .v { font-size: 1.18em; }
+      .grid { grid-template-columns: repeat(auto-fill, minmax(min(126px, 100%), 1fr)); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; animation: none !important; }
+    }
   `;
 
   const esc = (s) => String(s == null ? '' : s)
@@ -268,6 +558,7 @@
         this._form.volume = '';
         this._form.total_cost = '';
         this._form.note = '';
+        this._render();
       } catch (e) { /* 已记录 _error */ }
     }
 
@@ -276,6 +567,7 @@
       try {
         await this._call('delete_refuel_record', { vehicle: this._vehicle, index }, false);
         this._result = { deleted: index };
+        this._render();
       } catch (e) { /* 已记录 _error */ }
     }
 
@@ -292,6 +584,7 @@
         await this._call('edit_refuel_record', payload, false);
         this._editIdx = null;
         this._result = { edited: true };
+        this._render();
       } catch (e) { /* 已记录 _error */ }
     }
 
@@ -403,20 +696,28 @@
 
     _htmlHeader() {
       const tabs = TABS.map((t) =>
-        `<div class="tab ${this._tab === t.id ? 'active' : ''}" data-tab="${t.id}">
-          <ha-icon icon="${t.icon}"></ha-icon>${t.label}</div>`).join('');
+        `<div class="tab ${this._tab === t.id ? 'active' : ''}" data-tab="${t.id}"
+              role="tab" aria-selected="${this._tab === t.id}">
+          <ha-icon icon="${t.icon}"></ha-icon><span>${t.label}</span></div>`).join('');
       return `
         <div class="header">
-          <div class="title"><ha-icon icon="mdi:gas-station"></ha-icon>${esc(this._config.title)}</div>
+          <div class="title">
+            <span class="title-icon"><ha-icon icon="mdi:gas-station"></ha-icon></span>
+            <span>${esc(this._config.title)}</span>
+          </div>
           ${this._vehicles.length > 1 ? this._htmlVehicleSelect() : ''}
         </div>
-        <div class="tabs">${tabs}</div>`;
+        <nav class="tabs" role="tablist">${tabs}</nav>`;
     }
 
     _htmlVehicleSelect() {
       const opts = this._vehicles.map((v) =>
         `<option value="${esc(v)}" ${v === this._vehicle ? 'selected' : ''}>${esc(v)}</option>`).join('');
-      return `<select class="vehicle" data-vehicle aria-label="选择车辆">${opts}</select>`;
+      return `<label class="vehicle-wrap" title="切换车辆">
+          <ha-icon icon="mdi:car"></ha-icon>
+          <select class="vehicle" data-vehicle aria-label="选择车辆">${opts}</select>
+          <ha-icon class="chev" icon="mdi:menu-down"></ha-icon>
+        </label>`;
     }
 
     _htmlTab() {
@@ -429,7 +730,8 @@
     /* 加油页签 */
     _htmlRefuel() {
       if (!this._vehicles.length) {
-        return `<div class="empty">还没有车辆。请先在集成「配置」中添加车辆。</div>`;
+        return `<div class="empty"><ha-icon icon="mdi:gas-station-off"></ha-icon>
+          还没有车辆。<br>请先在集成「配置」中添加车辆。</div>`;
       }
       const f = this._form;
       const cur = this._currentOdometer();
@@ -447,29 +749,31 @@
           <div>已删除第 ${r.deleted + 1} 条记录，统计已重算。</div></div>`;
       }
       return `
-        <div class="row">
-          <div class="field"><label>加油时间（改历史日期=按当时油价）</label>
-            <input type="datetime-local" data-f="date" value="${esc(f.date || this._nowLocal())}"></div>
-          <div class="field"><label>里程表读数 km（可留空；上次 ${esc(cur)}）</label>
-            <input type="number" step="0.1" min="0" data-f="odometer" value="${esc(f.odometer)}"></div>
-        </div>
-        <div class="row">
-          <div class="field"><label>加油量 L（与费用填其一或都填）</label>
-            <input type="number" step="0.01" min="0" data-f="volume" value="${esc(f.volume)}"></div>
+        <div class="form-grid">
+          <div class="field"><label>加油时间</label>
+            <input type="datetime-local" data-f="date" value="${esc(f.date || this._nowLocal())}">
+            <span class="sub">改历史日期 → 按当时油价计费</span></div>
+          <div class="field"><label>里程表 km</label>
+            <input type="number" step="0.1" min="0" data-f="odometer" value="${esc(f.odometer)}" placeholder="可留空">
+            <span class="sub">${cur === '' ? '可留空，不参与油耗统计' : `上次 ${esc(cur)} · 可留空`}</span></div>
+          <div class="field"><label>加油量 L</label>
+            <input type="number" step="0.01" min="0" data-f="volume" value="${esc(f.volume)}" placeholder="0.00">
+            <span class="sub">与费用二选一或都填</span></div>
           <div class="field"><label>费用 元</label>
-            <input type="number" step="0.01" min="0" data-f="total_cost" value="${esc(f.total_cost)}"></div>
+            <input type="number" step="0.01" min="0" data-f="total_cost" value="${esc(f.total_cost)}" placeholder="0.00"></div>
           <div class="field"><label>油品</label>
             <select data-f="fuel">${FUEL_OPTIONS.map((x) =>
               `<option ${x === f.fuel ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
           <div class="field"><label>备注</label>
-            <input type="text" data-f="note" value="${esc(f.note)}" placeholder="加油站/优惠等"></div>
+            <input type="text" data-f="note" value="${esc(f.note)}" placeholder="加油站 / 优惠等"></div>
         </div>
         <div class="flexright">
-          <button class="btn" data-action="submit" ${this._busy ? 'disabled' : ''}>
-            <ha-icon icon="mdi:send"></ha-icon>${this._busy ? '提交中…' : '提交加油记录'}</button>
+          <button class="btn btn-lg" data-action="submit" ${this._busy ? 'disabled' : ''}>
+            <ha-icon icon="mdi:${this._busy ? 'loading' : 'send'}" class="${this._busy ? 'spin' : ''}"></ha-icon>
+            ${this._busy ? '提交中…' : '提交加油记录'}</button>
         </div>
         ${resultHtml}
-        <div class="hint">只填量 → 按当日/历史油价算费用；只填费用 → 反算加油量。
+        <div class="tips">只填加油量 → 按当日/历史油价自动算费用；只填费用 → 反算加油量。
           里程表读数用于计算区间油耗，<b>留空则该区间不计入统计</b>（不影响其他区间）；
           时间与里程互相矛盾（区间 ≤ 0 或 > 900 km）会被拒绝入库并说明原因。</div>`;
     }
@@ -498,33 +802,37 @@
           这些区间不参与油耗统计，不影响其他区间；补上里程即可自动恢复。</div></div>`;
       }
       if (!recs.length) {
-        html += `<div class="empty">暂无记录。可在「加油」页签录入，或用下方批量导入。</div>`;
+        html += `<div class="empty"><ha-icon icon="mdi:file-document-outline"></ha-icon>
+          暂无记录。<br>可在「加油」页签录入，或用下方批量导入。</div>`;
       } else {
+        const editing = this._records().find((r) => r.index === this._editIdx);
+        if (editing) html += this._htmlEditPanel(editing);
         const rows = recs.map((rec) => {
-          if (this._editIdx === rec.index) return this._htmlEditRow(rec);
           const actions = this._pendingDelete === rec.index
-            ? `<button class="btn danger" data-del-confirm="${rec.index}">确认删除</button>
-               <button class="btn secondary" data-del-cancel>取消</button>`
-            : `<button class="btn secondary" data-edit="${rec.index}">改</button>
-               <button class="btn danger" data-del="${rec.index}">删</button>`;
+            ? `<button class="btn mini danger" data-del-confirm="${rec.index}">确认删除</button>
+               <button class="btn mini secondary" data-del-cancel>取消</button>`
+            : `<button class="icon-btn" data-edit="${rec.index}" title="修改" aria-label="修改记录"><ha-icon icon="mdi:pencil"></ha-icon></button>
+               <button class="icon-btn danger" data-del="${rec.index}" title="删除" aria-label="删除记录"><ha-icon icon="mdi:delete"></ha-icon></button>`;
           return `
-          <tr>
-            <td class="muted">${rec.index + 1}</td>
+          <tr${this._editIdx === rec.index ? ' class="editing"' : ''}>
+            <td class="muted num">${rec.index + 1}</td>
             <td>${esc(String(rec.date || '').slice(0, 10))}</td>
-            <td>${fmt(rec.odometer, 1)}</td>
-            <td>${fmt(rec.volume)}</td>
-            <td>${fmt(rec.total_cost)}</td>
-            <td>${fmt(rec.price)}</td>
-            <td>${rec.segment_distance != null ? fmt(rec.segment_distance, 0) + ' km' : '—'}</td>
-            <td>${rec.segment_consumption != null ? fmt(rec.segment_consumption) : '—'}</td>
-            <td class="muted">${esc(rec.note || '')}</td>
+            <td class="num">${fmt(rec.odometer, 1)}</td>
+            <td class="num">${fmt(rec.volume)}</td>
+            <td class="num">${fmt(rec.total_cost)}</td>
+            <td class="num">${fmt(rec.price)}</td>
+            <td class="num">${rec.segment_distance != null ? fmt(rec.segment_distance, 0) + ' km' : '—'}</td>
+            <td class="num">${rec.segment_consumption != null ? fmt(rec.segment_consumption) : '—'}</td>
+            <td class="muted note-cell" title="${esc(rec.note || '')}">${esc(rec.note || '')}</td>
             <td><div class="actions">${actions}</div></td>
           </tr>`;
         }).join('');
         html += `
-          <div style="overflow-x:auto">
+          <div class="table-wrap">
           <table>
-            <tr><th>#</th><th>日期</th><th>里程</th><th>加油量</th><th>费用</th><th>单价</th><th>区间里程</th><th>区间油耗</th><th>备注</th><th></th></tr>
+            <tr><th class="num">#</th><th>日期</th><th class="num">里程</th><th class="num">加油量</th>
+              <th class="num">费用</th><th class="num">单价</th><th class="num">区间里程</th>
+              <th class="num">区间油耗</th><th>备注</th><th></th></tr>
             ${rows}
           </table></div>`;
       }
@@ -541,42 +849,41 @@
             <div class="hint">每行一条：<b>日期, 里程, 加油量, 费用, [油品], [备注]</b>（逗号/分号/Tab 分隔；日期如 2026-08-01 或 2026-08-01 14:30；量与费用可只填一项）<br>
               <b>里程可以留空</b>，那一列写空即可（如 <code>2026-08-01, , 41.2, 338.5</code>）——该行照常入库，只是这个区间不参与油耗统计。</div>
             <textarea data-f="import" placeholder="2026-07-05, 11800, 41.2, 338.5, 92, 中石化&#10;2026-07-20, , 40.8, 335.0, 92, 里程缺失也可导入&#10;2026-08-20, 12350, , 335.0, 92, 只填费用">${esc(this._importText)}</textarea>
-            <div class="flexright"><button class="btn" data-action="do-import" ${this._busy ? 'disabled' : ''}>导入</button></div>
+            <div class="flexright"><button class="btn" data-action="do-import" ${this._busy ? 'disabled' : ''}>
+              <ha-icon icon="mdi:import"></ha-icon>开始导入</button></div>
             ${ir ? (ir.imported ? `<div class="msg ok"><ha-icon icon="mdi:check-circle-outline"></ha-icon><div><b>导入 ${ir.imported} 条</b>${ir.rejected && ir.rejected.length ? `另有 ${ir.rejected.length} 条被拒绝：<br>${ir.rejected.map((x) => `• ${esc(x)}`).join('<br>')}` : ''}</div></div>` : (ir.rejected && ir.rejected.length ? `<div class="msg err"><ha-icon icon="mdi:alert-circle-outline"></ha-icon><div><b>全部被拒绝</b>${ir.rejected.map((x) => `• ${esc(x)}`).join('<br>')}</div></div>` : '')) : ''}
           </div>`;
       }
       return html;
     }
 
-    _htmlEditRow(rec) {
+    _htmlEditPanel(rec) {
       const f = this._editForm;
       return `
-        <tr><td colspan="10">
-          <div class="editbox">
-            <div class="row">
-              <div class="field"><label>日期时间</label>
-                <input type="datetime-local" data-ef="date" value="${esc((f.date || rec.date || '').slice(0, 16))}"></div>
-              <div class="field"><label>里程 km</label>
-                <input type="number" step="0.1" data-ef="odometer" value="${esc(f.odometer != null ? f.odometer : rec.odometer)}"></div>
-              <div class="field"><label>加油量 L</label>
-                <input type="number" step="0.01" data-ef="volume" value="${esc(f.volume != null ? f.volume : rec.volume)}"></div>
-              <div class="field"><label>费用 元</label>
-                <input type="number" step="0.01" data-ef="total_cost" value="${esc(f.total_cost != null ? f.total_cost : rec.total_cost)}"></div>
-            </div>
-            <div class="row">
-              <div class="field"><label>油品</label>
-                <select data-ef="fuel">${FUEL_OPTIONS.map((x) =>
-                  `<option ${x === (f.fuel || rec.fuel_type || '自动') ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
-              <div class="field"><label>备注</label>
-                <input type="text" data-ef="note" value="${esc(f.note != null ? f.note : rec.note)}"></div>
-            </div>
-            <div class="flexright">
-              <button class="btn" data-action="save-edit" ${this._busy ? 'disabled' : ''}>保存修改</button>
-              <button class="btn secondary" data-action="cancel-edit">取消</button>
-            </div>
-            <div class="hint">修改量或费用其一，另一项将按该记录日期的油价智能重算；时间-里程仍需保持递增对应。</div>
+        <div class="editbox">
+          <div class="editbox-title"><ha-icon icon="mdi:pencil"></ha-icon>修改第 ${rec.index + 1} 条记录</div>
+          <div class="form-grid">
+            <div class="field"><label>日期时间</label>
+              <input type="datetime-local" data-ef="date" value="${esc((f.date || rec.date || '').slice(0, 16))}"></div>
+            <div class="field"><label>里程 km</label>
+              <input type="number" step="0.1" data-ef="odometer" value="${esc(f.odometer != null ? f.odometer : rec.odometer)}"></div>
+            <div class="field"><label>加油量 L</label>
+              <input type="number" step="0.01" data-ef="volume" value="${esc(f.volume != null ? f.volume : rec.volume)}"></div>
+            <div class="field"><label>费用 元</label>
+              <input type="number" step="0.01" data-ef="total_cost" value="${esc(f.total_cost != null ? f.total_cost : rec.total_cost)}"></div>
+            <div class="field"><label>油品</label>
+              <select data-ef="fuel">${FUEL_OPTIONS.map((x) =>
+                `<option ${x === (f.fuel || rec.fuel_type || '自动') ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+            <div class="field"><label>备注</label>
+              <input type="text" data-ef="note" value="${esc(f.note != null ? f.note : rec.note)}"></div>
           </div>
-        </td></tr>`;
+          <div class="flexright">
+            <button class="btn mini" data-action="save-edit" ${this._busy ? 'disabled' : ''}>
+              <ha-icon icon="mdi:content-save"></ha-icon>保存修改</button>
+            <button class="btn mini secondary" data-action="cancel-edit">取消</button>
+          </div>
+          <div class="hint">修改量或费用其一，另一项将按该记录日期的油价智能重算；时间-里程仍需保持递增对应。</div>
+        </div>`;
     }
 
     /* 油价页签 */
@@ -598,12 +905,21 @@
         chg: p.attributes.price_change == null ? null : Number(p.attributes.price_change),
       })).filter((f) => f.key);
 
+      const fuelIcon = (key, label) => {
+        const k = String(key || '').toUpperCase();
+        const l = String(label || '');
+        if (k.includes('LNG') || l.includes('LNG')) return 'mdi:gas-cylinder';
+        if (k.includes('DIESEL') || l.includes('#') || /-\d+/.test(l)) return 'mdi:fuel';
+        return 'mdi:gas-station';
+      };
+
       if (fuels.length) {
         html += `<div class="grid">` + fuels.map((f) => {
           const dir = f.chg == null || f.chg === 0 ? '' : (f.chg > 0 ? 'up' : 'down');
           const arrow = f.chg == null || f.chg === 0 ? '' : (f.chg > 0 ? '▲' : '▼');
           return `<div class="stat">
-            <div class="v">${fmt(f.price)}${arrow ? ` <span class="${dir}" style="font-size:.7em">${arrow}</span>` : ''}</div>
+            <span class="stat-icon"><ha-icon icon="${fuelIcon(f.key, f.label)}"></ha-icon></span>
+            <div class="v">${fmt(f.price)}${arrow ? ` <span class="${dir}" style="font-size:.6em">${arrow}</span>` : ''}</div>
             <div class="k">${esc(f.label)} 元/L</div>
             <div class="d ${dir}">涨跌 ${f.chg == null ? '—' : signed(f.chg)}</div></div>`;
         }).join('') + `</div>`;
@@ -617,26 +933,27 @@
       if (periodId != null) bits.push(`第 ${esc(periodId)} 期`);
       if (period) bits.push(`周期 ${esc(period)}`);
       if (daysLeft != null) bits.push(`距下次调价 <b>${esc(daysLeft)}</b> 天`);
-      if (bits.length) html += `<div class="hint">${bits.join(' ｜ ')}</div>`;
+      if (bits.length) html += `<div class="meta">${bits.map((b) => `<span>${b}</span>`).join('')}</div>`;
 
       if (!hist.length || !fuels.length) {
-        return html + `<div class="empty">油价历史数据尚未加载完成（稍等片刻或检查集成状态）。</div>`;
+        return html + `<div class="empty"><ha-icon icon="mdi:chart-line"></ha-icon>
+          油价历史数据尚未加载完成。<br>稍等片刻或检查集成状态。</div>`;
       }
 
       // prices/changes 的 key 是接口数据字段名（GAS_92 等），与实体的 fuel_key 对应
-      const head = `<tr><th>调价周期</th>${fuels.map((f) => `<th>${esc(f.label)}</th>`).join('')}<th>涨跌</th></tr>`;
+      const head = `<tr><th>调价周期</th>${fuels.map((f) => `<th class="num">${esc(f.label)}</th>`).join('')}<th class="num">涨跌</th></tr>`;
       const baseKey = fuels[0].key;
       const rows = hist.slice(0, HISTORY_ROWS).map((h) => {
         const p = h.prices || {};
         const c = (h.changes || {})[baseKey];
         const dir = c == null || c === 0 ? '' : (c > 0 ? 'up' : 'down');
         return `<tr>
-          <td class="muted">${esc(h.start || '')} ~ ${esc(h.end || '')}</td>
-          ${fuels.map((f) => `<td>${fmt(p[f.key])}</td>`).join('')}
-          <td class="${dir}">${c == null ? '—' : signed(c)}</td>
+          <td class="muted period">${esc(h.start || '')} ~ ${esc(h.end || '')}</td>
+          ${fuels.map((f) => `<td class="num">${fmt(p[f.key])}</td>`).join('')}
+          <td class="num ${dir}">${c == null ? '—' : signed(c)}</td>
         </tr>`;
       }).join('');
-      html += `<div style="overflow-x:auto"><table>${head}${rows}</table></div>`;
+      html += `<div class="table-wrap"><table>${head}${rows}</table></div>`;
 
       // 走势图：优先 92 号汽油，否则用第一个油品
       const chart = fuels.find((f) => f.key === 'GAS_92') || fuels[0];
@@ -648,7 +965,7 @@
         const vals = series.map((x) => x.v);
         const min = Math.min(...vals), max = Math.max(...vals);
         const span = (max - min) || 1;
-        html += `<div style="margin-top:10px"><div class="hint">${esc(chart.label)} 价格走势（近 ${series.length} 期）：</div>` +
+        html += `<div class="chart"><div class="hint">${esc(chart.label)} 价格走势（近 ${series.length} 期）</div>` +
           series.map((x) => {
             const w = 12 + Math.round(((x.v - min) / span) * 88);
             return `<div class="bar-wrap"><div class="bar-label">${esc(x.end)}</div>
@@ -662,28 +979,32 @@
     /* 统计页签 */
     _htmlStats() {
       if (!this._vehicles.length) {
-        return `<div class="empty">还没有车辆。</div>`;
+        return `<div class="empty"><ha-icon icon="mdi:chart-box-outline"></ha-icon>还没有车辆。</div>`;
       }
       const s = this._stats();
       const q = this._qualityEntity();
       const problems = (q && q.attributes.problems) || [];
       const gaps = Number((q && q.attributes.odometer_gaps) || 0);
-      const tile = (v, k, d = 2) =>
-        `<div class="stat"><div class="v">${v == null ? '—' : fmt(v, d)}</div><div class="k">${k}</div></div>`;
+      const tile = (icon, v, k, d = 2) =>
+        `<div class="stat"><span class="stat-icon"><ha-icon icon="${icon}"></ha-icon></span>
+         <div class="v">${v == null ? '—' : fmt(v, d)}</div><div class="k">${k}</div></div>`;
 
       return `
         ${problems.length ? `<div class="msg warn"><ha-icon icon="mdi:alert-outline"></ha-icon><div><b>数据需修正（${problems.length} 项）——这些区间已排除在统计外</b>${problems.map((p) => `• ${esc(p)}`).join('<br>')}</div></div>` : ''}
         ${gaps ? `<div class="msg info"><ha-icon icon="mdi:information-outline"></ha-icon><div><b>${gaps} 处区间缺少里程读数</b>未计入里程与油耗统计。</div></div>` : ''}
         <div class="grid">
-          ${tile(s.odometer, '当前里程 km', 1)}
-          <div class="stat"><div class="v">${esc(s.refuel_count == null ? '—' : s.refuel_count)}</div><div class="k">加油次数</div></div>
-          ${tile(s.total_volume, '累计加油 L', 1)}
-          ${tile(s.total_cost, '累计费用 元', 0)}
-          ${tile(s.total_distance, '累计行驶 km', 1)}
-          ${tile(s.last_consumption, '最近油耗 L/100km')}
-          ${tile(s.avg_consumption, '平均油耗 L/100km')}
-          ${tile(s.avg_price, '平均油价 元/L')}
-          ${tile(s.per_km_cost, '每公里油费 元', 3)}
+          ${tile('mdi:counter', s.odometer, '当前里程 km', 1)}
+          <div class="stat"><span class="stat-icon"><ha-icon icon="mdi:gas-station"></ha-icon></span>
+            <div class="v">${esc(s.refuel_count == null ? '—' : s.refuel_count)}</div><div class="k">加油次数</div></div>
+          ${tile('mdi:fuel', s.total_volume, '累计加油 L', 1)}
+          ${tile('mdi:cash-multiple', s.total_cost, '累计费用 元', 0)}
+          ${tile('mdi:map-marker-distance', s.total_distance, '累计行驶 km', 1)}
+          ${tile('mdi:speedometer', s.last_consumption, '最近油耗 L/100km')}
+          ${tile('mdi:chart-line', s.avg_consumption, '平均油耗 L/100km')}
+          ${tile('mdi:currency-cny', s.avg_price, '平均油价 元/L')}
+          <div class="stat wide"><span class="stat-icon"><ha-icon icon="mdi:calculator"></ha-icon></span>
+            <div class="v">${s.per_km_cost == null ? '—' : fmt(s.per_km_cost, 3)}<span class="unit">元</span></div>
+            <div class="k">每公里油费</div></div>
         </div>
         <div class="hint">数值直接取自集成后端统计（与「加油记录」设备下的传感器一致）。
           平均油耗 = 除去首箱的区间加油量合计 ÷ 区间里程合计（加满假设）。
@@ -711,6 +1032,13 @@
         const key = e.currentTarget.dataset.f;
         if (key === 'import') { this._importText = e.currentTarget.value; return; }
         this._form[key] = e.currentTarget.value;
+      });
+      // 表单内回车即可提交（textarea 不会触发）
+      on('input[data-f]', 'keydown', (e) => {
+        if (e.key === 'Enter' && this._tab === 'refuel' && !this._busy) {
+          e.preventDefault();
+          this._submit();
+        }
       });
       on('[data-f="fuel"]', 'change', (e) => { this._form.fuel = e.currentTarget.value; });
       on('[data-ef]', 'input', (e) => {
