@@ -2,7 +2,7 @@
 
 ![HA 版本](https://img.shields.io/badge/Home%20Assistant-2024.8%2B-blue)
 ![HACS](https://img.shields.io/badge/HACS-Custom-green)
-![版本](https://img.shields.io/badge/版本-1.0.3-orange)
+![版本](https://img.shields.io/badge/版本-1.0.4-orange)
 
 一个 [Home Assistant](https://www.home-assistant.io/) 的 [HACS](https://hacs.xyz/) 自定义集成：
 

@@ -3,7 +3,7 @@
  *
  * 安装：将本文件复制到 /config/www/sinopec-oil-card.js，然后在
  * 仪表盘 → 右上角 ⋮ → 管理资源 → 添加
- *   URL: /local/sinopec-oil-card.js   版本: 1.1.0
+ *   URL: /local/sinopec-oil-card.js   版本: 1.0.4
  * 使用：仪表盘添加卡片 → 手动 →
  *   type: custom:sinopec-oil-card
  * 可选: title: 我的油卡   vehicle: 某辆车（不填则记住上次选择）
@@ -12,7 +12,7 @@
  * 无需填写任何实体 ID。
  *
  * 页签：加油 · 历史 · 油价 · 统计
- * 1.1.0 界面重构：容器查询自适应布局（按卡片实际宽度而非屏幕）、
+ * 1.0.4 界面重构：容器查询自适应布局（按卡片实际宽度而非屏幕）、
  *       分段式页签、分区表单、统计/油价磁贴、表格圆角化 + 行悬浮 +
  *       数字右对齐、提交按钮回车快捷键；功能与数据口径完全不变。
  * 规则：区间油耗由相邻里程差算出（0 < Δ ≤ 900 km）。
@@ -441,7 +441,7 @@
       const count = Object.keys(states).length;
       let vehicleChanged = false;
 
-      // 实体增删（新车辆、新油品）时才重新发现，避免每次推送全表扫描
+      // 实体增删（新车辆、新油品）时才重新扫描角色，避免每次推送全表过滤
       if (!this._entityIds || count !== this._stateCount) {
         this._stateCount = count;
         const before = this._vehicle;
@@ -449,6 +449,10 @@
         this._rememberVehicle();
         vehicleChanged = before !== this._vehicle;
       }
+      // 每次推送都必须用当前 states 重新绑定实体对象：
+      // _discover 只在实体增删时运行，若此处不重绑，读到的 attributes
+      // 会停留在上次扫描的快照（表现为改完记录/刷新油价后界面不变）。
+      this._bindStates(states);
 
       // 仅在本卡片关心的实体发生变化时重绘：
       // HA 每秒都会推送 hass，无节流会导致输入框反复失焦。
@@ -463,20 +467,41 @@
 
     /* ---------- 实体自动发现 ---------- */
     _discover(states) {
-      const byRole = (role) => Object.values(states)
-        .filter((s) => s.attributes && s.attributes.sinopec_role === role);
-      this._recordsEnts = byRole('sinopec_records');
-      this._qualityEnts = byRole('sinopec_quality');
-      this._odometerEnts = byRole('sinopec_odometer');
-      this._priceEnts = byRole('sinopec_price');
-      this._historyEnt = byRole('sinopec_price_history')[0] || null;
-      this._periodEndEnt = byRole('sinopec_period_end')[0] || null;
-      this._trendEnt = byRole('sinopec_trend')[0] || null;
-      this._vehicles = this._recordsEnts.map((s) => s.attributes.vehicle).filter(Boolean);
+      // 只记录「角色 → 实体 ID」，状态对象由 _bindStates 每次推送时重取
+      const idsByRole = (role) => Object.values(states)
+        .filter((s) => s.attributes && s.attributes.sinopec_role === role)
+        .map((s) => s.entity_id);
+      this._ids = {
+        records: idsByRole('sinopec_records'),
+        quality: idsByRole('sinopec_quality'),
+        odometer: idsByRole('sinopec_odometer'),
+        price: idsByRole('sinopec_price'),
+        history: idsByRole('sinopec_price_history')[0] || null,
+        periodEnd: idsByRole('sinopec_period_end')[0] || null,
+        trend: idsByRole('sinopec_trend')[0] || null,
+      };
+      this._vehicles = this._ids.records
+        .map((id) => states[id] && states[id].attributes.vehicle)
+        .filter(Boolean);
       this._entityIds = [...new Set([
-        ...this._recordsEnts, ...this._qualityEnts, ...this._odometerEnts,
-        ...this._priceEnts, this._historyEnt, this._periodEndEnt, this._trendEnt,
-      ].filter(Boolean).map((s) => s.entity_id))];
+        ...this._ids.records, ...this._ids.quality, ...this._ids.odometer,
+        ...this._ids.price, this._ids.history, this._ids.periodEnd,
+        this._ids.trend,
+      ].filter(Boolean))];
+    }
+
+    /** 用当前 states 重新绑定实体对象，保证读到的 attributes 是最新的。 */
+    _bindStates(states) {
+      const ids = this._ids;
+      if (!ids) return;
+      const pickAll = (list) => list.map((id) => states[id]).filter(Boolean);
+      this._recordsEnts = pickAll(ids.records);
+      this._qualityEnts = pickAll(ids.quality);
+      this._odometerEnts = pickAll(ids.odometer);
+      this._priceEnts = pickAll(ids.price);
+      this._historyEnt = (ids.history && states[ids.history]) || null;
+      this._periodEndEnt = (ids.periodEnd && states[ids.periodEnd]) || null;
+      this._trendEnt = (ids.trend && states[ids.trend]) || null;
     }
 
     _rememberVehicle() {
@@ -882,7 +907,7 @@
               <ha-icon icon="mdi:content-save"></ha-icon>保存修改</button>
             <button class="btn mini secondary" data-action="cancel-edit">取消</button>
           </div>
-          <div class="hint">修改量或费用其一，另一项将按该记录日期的油价智能重算；时间-里程仍需保持递增对应。</div>
+          <div class="hint">修改加油量或费用其一，另一项会按该记录的单价重算；两项都改则以「费用 ÷ 加油量」为准。</div>
         </div>`;
     }
 

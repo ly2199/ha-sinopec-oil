@@ -351,7 +351,7 @@ async def _async_build_record(
             )
             fuel_key = key
     else:
-        # 需要基准油价
+        # 需要基准油价：显式传入的单价（成交价）优先，否则用当日/历史油价
         ref_price = None
         available: set[str] = set()
         if runtime is not None and runtime.price_coordinator.data:
@@ -361,9 +361,12 @@ async def _async_build_record(
                 vehicle_info, fuel_input, available
             )
             fuel_key = key
-            if key is not None and when_date >= today:
+            if price_input is None and key is not None and when_date >= today:
                 ref_price = oil.prices.get(key)
                 price_source = f"当前油价（{oil.display_name}）"
+        if price_input is not None:
+            ref_price = float(price_input)
+            price_source = "手动输入"
         if ref_price is None:
             # 历史日期或当前缓存中没有：查询历史调价周期
             keys = resolve_fuel_keys(fuel_input or "")
@@ -689,6 +692,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         ):
             if key in call.data:
                 merged[key] = call.data[key]
+
+        # 只改量或只改费时，另一项必须按单价重算，而不是沿用旧值
+        # （两项同时给出才视为「实际成交」，此时单价 = 费用 / 量）
+        if ATTR_VOLUME in call.data and ATTR_TOTAL_COST not in call.data:
+            merged.pop(ATTR_TOTAL_COST, None)
+        elif ATTR_TOTAL_COST in call.data and ATTR_VOLUME not in call.data:
+            merged.pop(ATTR_VOLUME, None)
+
         if isinstance(merged.get(ATTR_DATE), str):
             merged[ATTR_DATE] = datetime.fromisoformat(merged[ATTR_DATE])
 
