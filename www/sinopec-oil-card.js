@@ -3,7 +3,7 @@
  *
  * 安装：将本文件复制到 /config/www/sinopec-oil-card.js，然后在
  * 仪表盘 → 右上角 ⋮ → 管理资源 → 添加
- *   URL: /local/sinopec-oil-card.js   版本: 1.0.4
+ *   URL: /local/sinopec-oil-card.js   版本: 1.0.5
  * 使用：仪表盘添加卡片 → 手动 →
  *   type: custom:sinopec-oil-card
  * 可选: title: 我的油卡   vehicle: 某辆车（不填则记住上次选择）
@@ -12,6 +12,9 @@
  * 无需填写任何实体 ID。
  *
  * 页签：加油 · 历史 · 油价 · 统计
+ * 1.0.5 记账口径：区分「加油费用」（挂牌价合计）与「实际支付」（真实付款），
+ *       优惠金额 = 加油费用 - 实际支付，由后端自动计算；
+ *       留空实际支付即视为无优惠；历史记录与统计磁贴同步展示优惠。
  * 1.0.4 界面重构：容器查询自适应布局（按卡片实际宽度而非屏幕）、
  *       分段式页签、分区表单、统计/油价磁贴、表格圆角化 + 行悬浮 +
  *       数字右对齐、提交按钮回车快捷键；功能与数据口径完全不变。
@@ -418,7 +421,7 @@
       if (!config) throw new Error('配置无效');
       this._config = { title: '中石化加油记账', ...config };
       this._tab = 'refuel';
-      this._form = { date: null, odometer: '', volume: '', total_cost: '', fuel: '自动', note: '' };
+      this._form = { date: null, odometer: '', volume: '', total_cost: '', actual_payment: '', fuel: '自动', note: '' };
       this._result = null;      // 提交响应
       this._error = null;       // 错误信息
       this._busy = false;
@@ -570,18 +573,26 @@
       if (f.odometer !== '' && f.odometer != null) payload.odometer = Number(f.odometer);
       if (f.volume !== '' && f.volume != null) payload.volume = Number(f.volume);
       if (f.total_cost !== '' && f.total_cost != null) payload.total_cost = Number(f.total_cost);
+      if (f.actual_payment !== '' && f.actual_payment != null) payload.actual_payment = Number(f.actual_payment);
       if (f.fuel && f.fuel !== '自动') payload.fuel_type = f.fuel;
       if (f.note) payload.note = f.note;
-      if (payload.volume == null && payload.total_cost == null) {
-        this._error = '请至少填写加油量或费用之一（都填则自动算单价）。';
+      if (payload.volume == null && payload.total_cost == null && payload.actual_payment == null) {
+        this._error = '请至少填写加油量、加油费用或实际支付之一（费用与实付都填则自动算优惠）。';
+        this._render(); return;
+      }
+      // 本地先校验一次，避免"实付 > 加油费用"的服务端拒绝白跑一趟
+      if (payload.total_cost != null && payload.actual_payment != null
+          && payload.actual_payment > payload.total_cost) {
+        this._error = `实际支付（${payload.actual_payment} 元）不能高于加油费用（${payload.total_cost} 元）。`;
         this._render(); return;
       }
       try {
         const resp = await this._call('record_refuel', payload, true);
         this._result = resp || { ok: true };
-        // 清空量/费/备注，里程停留在提交值供下次微调
+        // 清空量/费/实付/备注，里程停留在提交值供下次微调
         this._form.volume = '';
         this._form.total_cost = '';
+        this._form.actual_payment = '';
         this._form.note = '';
         this._render();
       } catch (e) { /* 已记录 _error */ }
@@ -598,13 +609,25 @@
 
     async _saveEdit() {
       const f = this._editForm;
+      const pay = (v) => (v === '' || v == null || v === '—') ? null : Number(v);
       const payload = { vehicle: this._vehicle, index: this._editIdx };
       if (f.date) payload.date = f.date;
-      if (f.odometer !== '' && f.odometer != null) payload.odometer = Number(f.odometer);
-      if (f.volume !== '' && f.volume != null) payload.volume = Number(f.volume);
-      if (f.total_cost !== '' && f.total_cost != null) payload.total_cost = Number(f.total_cost);
+      const odo = pay(f.odometer);
+      if (odo != null) payload.odometer = odo;
+      // 编辑面板里显示的是当前值，因此"看到的即提交的"：
+      // 三个金额项都按输入框内容提交，未改动即等于原值，不会误清优惠。
+      const vol = pay(f.volume);
+      if (vol != null) payload.volume = vol;
+      const cost = pay(f.total_cost);
+      if (cost != null) payload.total_cost = cost;
+      const paid = pay(f.actual_payment);
+      if (paid != null) payload.actual_payment = paid;
       if (f.fuel && f.fuel !== '自动') payload.fuel_type = f.fuel;
       if (f.note !== undefined) payload.note = f.note;
+      if (cost != null && paid != null && paid > cost) {
+        this._error = `实际支付（${paid} 元）不能高于加油费用（${cost} 元）。`;
+        this._render(); return;
+      }
       try {
         await this._call('edit_refuel_record', payload, false);
         this._editIdx = null;
@@ -615,18 +638,46 @@
 
     _parseImport() {
       const lines = this._importText.split('\n').map((l) => l.trim()).filter(Boolean);
-      const out = [];
-      for (const line of lines) {
-        if (/^(日期|date)/i.test(line)) continue; // 表头
+      const splitLine = (line) => {
         // 保留空单元格以维持列位置（否则 "日期,,41.2,338" 会被错位解析），
         // 只去掉行尾的空列
         const parts = line.split(/[,;\t，]/).map((p) => p.trim());
         while (parts.length && parts[parts.length - 1] === '') parts.pop();
+        return parts;
+      };
+      // 6 列时第 5 列是"实际支付"还是旧写法的"油品"列存在歧义，
+      // 整批数据按一个口径统一解析：只要出现 7 列以上，或某行第 5、6 列
+      // 都是非空数字（实付 + 油品号），就认定这批用的是新写法，
+      // 避免同一批数据被两种口径拆散。旧写法请保持 6 列以内。
+      const isNumeric = (v) => v != null && v !== '' && !isNaN(parseFloat(v));
+      const newStyleByColumns = lines.some((line) => {
+        const p = splitLine(line);
+        return (
+          p.length >= 7 ||
+          (p.length === 6 && isNumeric(p[4]) && isNumeric(p[5]))
+        );
+      });
+      const out = [];
+      for (const line of lines) {
+        if (/^(日期|date)/i.test(line)) continue; // 表头
+        const parts = splitLine(line);
         if (!parts.length || !parts[0]) {
           out.push({ raw: line, error: '缺少日期' });
           continue;
         }
-        const [date, odo, vol, cost, fuel, ...noteParts] = parts;
+        // 列含义：日期, 里程, 加油量, 加油费用, [实际支付], [油品], [备注]
+        const [date, odo, vol, cost, fifth, sixth, ...rest] = parts;
+        const fifthFilled = fifth != null && fifth !== '';
+        const isNew = newStyleByColumns;
+        let pay = '';
+        let fuel = '';
+        if (isNew) {
+          pay = fifthFilled ? fifth : '';
+          fuel = sixth || '';
+        } else {
+          fuel = fifthFilled ? fifth : '';
+        }
+        const noteParts = isNew ? rest : [sixth, ...rest];
         const rec = { date: date.length === 10 ? date + 'T12:00:00' : date };
         // 里程可留空：该行照常入库，只是这个区间不参与油耗统计
         if (odo) {
@@ -641,11 +692,21 @@
         }
         if (cost) {
           const c = parseFloat(cost);
-          if (isNaN(c)) { out.push({ raw: line, error: `费用不是数字：${cost}` }); continue; }
+          if (isNaN(c)) { out.push({ raw: line, error: `加油费用不是数字：${cost}` }); continue; }
           rec.total_cost = c;
         }
-        if (rec.volume == null && rec.total_cost == null) {
-          out.push({ raw: line, error: '加油量与费用至少填一项' });
+        if (pay) {
+          const p = parseFloat(pay);
+          if (isNaN(p)) { out.push({ raw: line, error: `实际支付不是数字：${pay}` }); continue; }
+          rec.actual_payment = p;
+        }
+        if (rec.total_cost != null && rec.actual_payment != null
+            && rec.actual_payment > rec.total_cost) {
+          out.push({ raw: line, error: '实际支付不能高于加油费用' });
+          continue;
+        }
+        if (rec.volume == null && rec.total_cost == null && rec.actual_payment == null) {
+          out.push({ raw: line, error: '加油量、加油费用与实际支付至少填一项' });
           continue;
         }
         if (fuel) rec.fuel_type = fuel;
@@ -763,10 +824,14 @@
       if (f.odometer === '' && cur !== '') f.odometer = cur;
       const r = this._result;
       let resultHtml = '';
-      if (r && (r.volume != null || r.total_cost != null)) {
+      if (r && (r.volume != null || r.total_cost != null || r.actual_payment != null)) {
+        const paid = r.actual_payment == null ? r.total_cost : r.actual_payment;
+        const disc = r.discount != null ? r.discount
+          : (r.total_cost != null && paid != null ? r.total_cost - paid : null);
         resultHtml = `<div class="msg ok"><ha-icon icon="mdi:check-circle-outline"></ha-icon><div>
           <b>已记录加油</b>
-          加油量：${fmt(r.volume)} L ｜ 费用：${fmt(r.total_cost)} 元<br>
+          加油量：${fmt(r.volume)} L ｜ 加油费用：${fmt(r.total_cost)} 元<br>
+          实际支付：${fmt(paid)} 元${disc ? ` ｜ <b>优惠：${fmt(disc)} 元</b>` : ''}<br>
           单价：${fmt(r.price)} 元/L${r.price_approximate ? '（约）' : ''}${r.price_source ? ` ｜ ${esc(r.price_source)}` : ''}${r.distance_since_last != null ? `<br>区间里程：${fmt(r.distance_since_last, 1)} km` : ''}${r.consumption_last != null ? ` ｜ 本次油耗：${fmt(r.consumption_last)} L/100km` : ''}
           </div></div>`;
       } else if (r && r.deleted != null) {
@@ -784,8 +849,12 @@
           <div class="field"><label>加油量 L</label>
             <input type="number" step="0.01" min="0" data-f="volume" value="${esc(f.volume)}" placeholder="0.00">
             <span class="sub">与费用二选一或都填</span></div>
-          <div class="field"><label>费用 元</label>
-            <input type="number" step="0.01" min="0" data-f="total_cost" value="${esc(f.total_cost)}" placeholder="0.00"></div>
+          <div class="field"><label>加油费用 元</label>
+            <input type="number" step="0.01" min="0" data-f="total_cost" value="${esc(f.total_cost)}" placeholder="0.00">
+            <span class="sub">挂牌价合计（用于算平均油价）</span></div>
+          <div class="field"><label>实际支付 元</label>
+            <input type="number" step="0.01" min="0" data-f="actual_payment" value="${esc(f.actual_payment)}" placeholder="留空 = 无优惠">
+            <span class="sub">留空即按费用全额，优惠自动计算</span></div>
           <div class="field"><label>油品</label>
             <select data-f="fuel">${FUEL_OPTIONS.map((x) =>
               `<option ${x === f.fuel ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
@@ -799,6 +868,8 @@
         </div>
         ${resultHtml}
         <div class="tips">只填加油量 → 按当日/历史油价自动算费用；只填费用 → 反算加油量。
+          <b>加油费用与实际支付都填时自动算优惠</b>（优惠 = 加油费用 − 实际支付），
+          只填一个或留空实付则视为无优惠。
           里程表读数用于计算区间油耗，<b>留空则该区间不计入统计</b>（不影响其他区间）；
           时间与里程互相矛盾（区间 ≤ 0 或 > 900 km）会被拒绝入库并说明原因。</div>`;
     }
@@ -845,6 +916,8 @@
             <td class="num">${fmt(rec.odometer, 1)}</td>
             <td class="num">${fmt(rec.volume)}</td>
             <td class="num">${fmt(rec.total_cost)}</td>
+            <td class="num">${fmt(rec.actual_payment == null ? rec.total_cost : rec.actual_payment)}</td>
+            <td class="num">${rec.discount ? `<span class="pill good">${fmt(rec.discount)}</span>` : '—'}</td>
             <td class="num">${fmt(rec.price)}</td>
             <td class="num">${rec.segment_distance != null ? fmt(rec.segment_distance, 0) + ' km' : '—'}</td>
             <td class="num">${rec.segment_consumption != null ? fmt(rec.segment_consumption) : '—'}</td>
@@ -856,7 +929,8 @@
           <div class="table-wrap">
           <table>
             <tr><th class="num">#</th><th>日期</th><th class="num">里程</th><th class="num">加油量</th>
-              <th class="num">费用</th><th class="num">单价</th><th class="num">区间里程</th>
+              <th class="num">加油费用</th><th class="num">实际支付</th><th class="num">优惠</th>
+              <th class="num">单价</th><th class="num">区间里程</th>
               <th class="num">区间油耗</th><th>备注</th><th></th></tr>
             ${rows}
           </table></div>`;
@@ -871,9 +945,13 @@
         const ir = this._importResult;
         html += `
           <div class="editbox">
-            <div class="hint">每行一条：<b>日期, 里程, 加油量, 费用, [油品], [备注]</b>（逗号/分号/Tab 分隔；日期如 2026-08-01 或 2026-08-01 14:30；量与费用可只填一项）<br>
-              <b>里程可以留空</b>，那一列写空即可（如 <code>2026-08-01, , 41.2, 338.5</code>）——该行照常入库，只是这个区间不参与油耗统计。</div>
-            <textarea data-f="import" placeholder="2026-07-05, 11800, 41.2, 338.5, 92, 中石化&#10;2026-07-20, , 40.8, 335.0, 92, 里程缺失也可导入&#10;2026-08-20, 12350, , 335.0, 92, 只填费用">${esc(this._importText)}</textarea>
+            <div class="hint">每行一条：<b>日期, 里程, 加油量, 加油费用, 实际支付, [油品], [备注]</b>（逗号/分号/Tab 分隔；日期如 2026-08-01 或 2026-08-01 14:30；量与费用可只填一项）<br>
+              <b>优惠自动算</b>：实际支付留空即无优惠（如 <code>2026-08-01, 12000, 41.2, 338.0</code>）；
+              填了实付就算优惠（如 <code>2026-07-05, 11800, 41.2, 338.0, 300.0, 92, 中石化</code> → 优惠 38 元）。<br>
+              <b>里程可以留空</b>，那一列写空即可（如 <code>2026-08-01, , 41.2, 338.5</code>）——该行照常入库，只是这个区间不参与油耗统计。<br>
+              旧格式（<code>日期, 里程, 加油量, 加油费用, 油品, 备注</code>，6 列以内）仍可识别：
+              整批数据里只要有一行写到 7 列（含实际支付），就统一按新格式解析，因此新旧格式请勿混用。</div>
+            <textarea data-f="import" placeholder="2026-06-20, 10500, 40.5, 330.0, 300.0, 92, 中石化（优惠30）&#10;2026-07-05, 11800, 41.2, 338.0, , 92, 实际支付留空=无优惠&#10;2026-07-20, , 40.8, 335.0, 335.0, 92, 里程缺失也可导入&#10;2026-08-20, 12350, , 335.0, 310.0, 92, 只填费用与实付">${esc(this._importText)}</textarea>
             <div class="flexright"><button class="btn" data-action="do-import" ${this._busy ? 'disabled' : ''}>
               <ha-icon icon="mdi:import"></ha-icon>开始导入</button></div>
             ${ir ? (ir.imported ? `<div class="msg ok"><ha-icon icon="mdi:check-circle-outline"></ha-icon><div><b>导入 ${ir.imported} 条</b>${ir.rejected && ir.rejected.length ? `另有 ${ir.rejected.length} 条被拒绝：<br>${ir.rejected.map((x) => `• ${esc(x)}`).join('<br>')}` : ''}</div></div>` : (ir.rejected && ir.rejected.length ? `<div class="msg err"><ha-icon icon="mdi:alert-circle-outline"></ha-icon><div><b>全部被拒绝</b>${ir.rejected.map((x) => `• ${esc(x)}`).join('<br>')}</div></div>` : '')) : ''}
@@ -884,6 +962,9 @@
 
     _htmlEditPanel(rec) {
       const f = this._editForm;
+      // 旧记录没有 actual_payment：按 total_cost 回退（当时即实付，优惠 0）
+      const paid = rec.actual_payment == null ? rec.total_cost : rec.actual_payment;
+      const cur = (k, fallback) => esc(f[k] != null ? f[k] : fallback);
       return `
         <div class="editbox">
           <div class="editbox-title"><ha-icon icon="mdi:pencil"></ha-icon>修改第 ${rec.index + 1} 条记录</div>
@@ -891,11 +972,14 @@
             <div class="field"><label>日期时间</label>
               <input type="datetime-local" data-ef="date" value="${esc((f.date || rec.date || '').slice(0, 16))}"></div>
             <div class="field"><label>里程 km</label>
-              <input type="number" step="0.1" data-ef="odometer" value="${esc(f.odometer != null ? f.odometer : rec.odometer)}"></div>
+              <input type="number" step="0.1" data-ef="odometer" value="${cur('odometer', rec.odometer)}"></div>
             <div class="field"><label>加油量 L</label>
-              <input type="number" step="0.01" data-ef="volume" value="${esc(f.volume != null ? f.volume : rec.volume)}"></div>
-            <div class="field"><label>费用 元</label>
-              <input type="number" step="0.01" data-ef="total_cost" value="${esc(f.total_cost != null ? f.total_cost : rec.total_cost)}"></div>
+              <input type="number" step="0.01" data-ef="volume" value="${cur('volume', rec.volume)}"></div>
+            <div class="field"><label>加油费用 元</label>
+              <input type="number" step="0.01" data-ef="total_cost" value="${cur('total_cost', rec.total_cost)}"></div>
+            <div class="field"><label>实际支付 元</label>
+              <input type="number" step="0.01" data-ef="actual_payment" value="${cur('actual_payment', paid)}">
+              <span class="sub">优惠 = 加油费用 − 实际支付</span></div>
             <div class="field"><label>油品</label>
               <select data-ef="fuel">${FUEL_OPTIONS.map((x) =>
                 `<option ${x === (f.fuel || rec.fuel_type || '自动') ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
@@ -907,7 +991,9 @@
               <ha-icon icon="mdi:content-save"></ha-icon>保存修改</button>
             <button class="btn mini secondary" data-action="cancel-edit">取消</button>
           </div>
-          <div class="hint">修改加油量或费用其一，另一项会按该记录的单价重算；两项都改则以「费用 ÷ 加油量」为准。</div>
+          <div class="hint">修改加油量或费用其一，另一项会按该记录的单价重算，<b>原优惠金额保持不变</b>；
+            两项都改则以「费用 ÷ 加油量」为准；只改实际支付则加油费用不变，优惠随之变化。
+            实际支付留空 → 视为无优惠。</div>
         </div>`;
     }
 
@@ -1022,17 +1108,22 @@
           <div class="stat"><span class="stat-icon"><ha-icon icon="mdi:gas-station"></ha-icon></span>
             <div class="v">${esc(s.refuel_count == null ? '—' : s.refuel_count)}</div><div class="k">加油次数</div></div>
           ${tile('mdi:fuel', s.total_volume, '累计加油 L', 1)}
-          ${tile('mdi:cash-multiple', s.total_cost, '累计费用 元', 0)}
+          ${tile('mdi:cash-multiple', s.total_cost, '累计加油费用 元', 0)}
+          ${tile('mdi:credit-card-check-outline', s.total_payment, '累计实际支付 元', 0)}
           ${tile('mdi:map-marker-distance', s.total_distance, '累计行驶 km', 1)}
           ${tile('mdi:speedometer', s.last_consumption, '最近油耗 L/100km')}
           ${tile('mdi:chart-line', s.avg_consumption, '平均油耗 L/100km')}
           ${tile('mdi:currency-cny', s.avg_price, '平均油价 元/L')}
+          <div class="stat wide"><span class="stat-icon"><ha-icon icon="mdi:sale-outline"></ha-icon></span>
+            <div class="v">${s.total_discount == null ? '—' : fmt(s.total_discount, 2)}<span class="unit">元</span></div>
+            <div class="k">累计优惠${s.avg_discount_rate != null ? ` · 优惠率 ${fmt(s.avg_discount_rate, 1)}%` : ''}</div></div>
           <div class="stat wide"><span class="stat-icon"><ha-icon icon="mdi:calculator"></ha-icon></span>
             <div class="v">${s.per_km_cost == null ? '—' : fmt(s.per_km_cost, 3)}<span class="unit">元</span></div>
             <div class="k">每公里油费</div></div>
         </div>
         <div class="hint">数值直接取自集成后端统计（与「加油记录」设备下的传感器一致）。
           平均油耗 = 除去首箱的区间加油量合计 ÷ 区间里程合计（加满假设）。
+          累计优惠 = 各次（加油费用 − 实际支付）之和；平均油价与每公里油费仍按加油费用计算。
           数据质量：${q ? `<span class="pill ${problems.length ? 'bad' : 'good'}">${esc(q.state)}</span>` : '—'}</div>`;
     }
 

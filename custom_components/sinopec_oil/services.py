@@ -46,11 +46,25 @@ ATTR_VEHICLE = "vehicle"
 ATTR_ODOMETER = "odometer"
 ATTR_VOLUME = "volume"
 ATTR_TOTAL_COST = "total_cost"
+ATTR_ACTUAL_PAYMENT = "actual_payment"
+ATTR_DISCOUNT = "discount"
 ATTR_PRICE = "price"
 ATTR_FUEL_TYPE = "fuel_type"
 ATTR_DATE = "date"
 ATTR_NOTE = "note"
 ATTR_RECORDS = "records"
+# 内部键：编辑记录时把"原优惠"传给计价逻辑（不写入存储，入库前剥离）
+ATTR_KEEP_DISCOUNT = "_discount"
+
+# 加油费用（元）：挂牌价合计；实际支付（元）：本次真实付款；优惠 = 二者之差
+_OPTIONAL_COST_FIELDS = {
+    vol.Optional(ATTR_TOTAL_COST): vol.All(
+        vol.Coerce(float), vol.Range(min=0)
+    ),
+    vol.Optional(ATTR_ACTUAL_PAYMENT): vol.All(
+        vol.Coerce(float), vol.Range(min=0)
+    ),
+}
 
 _RECORD_ITEM_SCHEMA = vol.Schema(
     {
@@ -61,9 +75,7 @@ _RECORD_ITEM_SCHEMA = vol.Schema(
         vol.Optional(ATTR_VOLUME): vol.All(
             vol.Coerce(float), vol.Range(min=0.01)
         ),
-        vol.Optional(ATTR_TOTAL_COST): vol.All(
-            vol.Coerce(float), vol.Range(min=0)
-        ),
+        **_OPTIONAL_COST_FIELDS,
         vol.Optional(ATTR_PRICE): vol.All(
             vol.Coerce(float), vol.Range(min=0)
         ),
@@ -81,9 +93,7 @@ RECORD_REFUEL_SCHEMA = vol.Schema(
         vol.Optional(ATTR_VOLUME): vol.All(
             vol.Coerce(float), vol.Range(min=0.01)
         ),
-        vol.Optional(ATTR_TOTAL_COST): vol.All(
-            vol.Coerce(float), vol.Range(min=0)
-        ),
+        **_OPTIONAL_COST_FIELDS,
         vol.Optional(ATTR_PRICE): vol.All(
             vol.Coerce(float), vol.Range(min=0)
         ),
@@ -130,9 +140,7 @@ EDIT_RECORD_SCHEMA = vol.Schema(
         vol.Optional(ATTR_VOLUME): vol.All(
             vol.Coerce(float), vol.Range(min=0.01)
         ),
-        vol.Optional(ATTR_TOTAL_COST): vol.All(
-            vol.Coerce(float), vol.Range(min=0)
-        ),
+        **_OPTIONAL_COST_FIELDS,
         vol.Optional(ATTR_PRICE): vol.All(
             vol.Coerce(float), vol.Range(min=0)
         ),
@@ -183,6 +191,149 @@ class _BuiltRecord:
     record: dict[str, Any]
     price_source: str | None = None
     price_approximate: bool = False
+
+
+@dataclass
+class _CostBreakdown:
+    """金额三件套：加油费用（挂牌价）/ 实际支付 / 优惠。"""
+
+    total_cost: float | None
+    actual_payment: float | None
+    discount: float | None
+
+
+def _build_costs(
+    volume: float | None,
+    total_cost: Any,
+    actual_payment: Any,
+    reference_cost: float | None = None,
+    discount: Any = None,
+) -> _CostBreakdown:
+    """由量、加油费用、实际支付、优惠四个数中的任意组合补齐其余各项。
+
+    规则（加油费用 = 挂牌价合计，实际支付 = 真实付款，优惠 = 两者之差）：
+    - 量 + 加油费用：单价按"费用 ÷ 量"，属实际成交，直接采用；
+    - 只给量：加油费用 = 量 × 基准油价（调用方用 reference_cost 回传）；
+    - 只给加油费用：加油量 = 费用 ÷ 基准油价（由调用方反算）；
+    - 给了实际支付：缺加油费用时以实际支付为费用基准（不让历史数据凭空产生优惠）；
+    - 给了优惠：缺实付时按 实付 = 加油费用 - 优惠 补齐（编辑时保留原优惠的路径）；
+    - 只给实付可反推加油量（费用 = 实付，无优惠）。
+    """
+    cost = None if total_cost is None else float(total_cost)
+    payment = None if actual_payment is None else float(actual_payment)
+    discount_value = None if discount is None else float(discount)
+
+    if cost is None:
+        if payment is not None:
+            # 只关心实付：把实付当作费用基准，不给历史数据凭空生成优惠
+            cost = payment
+        elif reference_cost is not None:
+            cost = reference_cost
+
+    if cost is not None:
+        if discount_value is not None:
+            # 优惠已知：实付按 费用 - 优惠 补齐（用户显式给了实付则以实付为准）
+            if payment is None:
+                payment = cost - discount_value
+        elif payment is None:
+            # 未填实付：视为按挂牌价全额支付（优惠 0）
+            payment = cost
+
+    if discount_value is None and cost is not None and payment is not None:
+        discount_value = cost - payment
+    if discount_value is not None:
+        discount_value = round(discount_value, 2)
+
+    return _CostBreakdown(
+        total_cost=None if cost is None else round(cost, 2),
+        actual_payment=None if payment is None else round(payment, 2),
+        discount=discount_value,
+    )
+
+
+def _check_costs(breakdown: _CostBreakdown) -> None:
+    """金额合法性校验：实付高于挂牌价、优惠为负都视为输入错误。"""
+    cost = breakdown.total_cost
+    payment = breakdown.actual_payment
+    if cost is not None and payment is not None and payment > cost + 0.005:
+        raise HomeAssistantError(
+            f"实际支付（{payment} 元）不能高于加油费用（{cost} 元）："
+            "优惠 = 加油费用 - 实际支付，不能为负。请核对后重试。"
+        )
+
+
+def _merge_edit_data(
+    original: dict[str, Any], updates: dict[str, Any]
+) -> dict[str, Any]:
+    """把 edit_refuel_record 的改动合并进原记录，并决定哪些项需要重算。
+
+    未提供的字段沿用原记录；金额三件套（量 / 加油费用 / 实际支付）按以下口径
+    决定"沿用还是重算"，重算通过把字段从结果中移除来表达
+    （_async_build_record 会用记录日期的油价补齐）：
+
+    - 只改加油量 → 移除 total_cost（费用按油价重算），
+      并用内部键 `_discount` 传原优惠，使新实付 = 新费用 - 原优惠；
+    - 只改加油费用 → 移除 volume（量按费用反算），`_discount` 同样保留原优惠；
+    - 量费同时给出 → 视为实际成交，单价 = 费用 / 量；
+      没给实付则视为无优惠（不与原记录的旧优惠叠加）；
+    - 量费都没改（只改里程/时间/备注/油品）→ 金额与优惠原样沿用，
+      移除 volume 避免量按油价被重算。
+
+    `_discount` 是内部传递键，不会被写入记录（入库前会被剥离）。
+    """
+    merged: dict[str, Any] = {**original}
+    for key in (
+        ATTR_DATE,
+        ATTR_ODOMETER,
+        ATTR_VOLUME,
+        ATTR_TOTAL_COST,
+        ATTR_ACTUAL_PAYMENT,
+        ATTR_PRICE,
+        ATTR_FUEL_TYPE,
+        ATTR_NOTE,
+    ):
+        if key in updates:
+            merged[key] = updates[key]
+
+    # 旧记录可能没有 actual_payment：按 total_cost 回退，优惠视为 0
+    original_cost = _to_float(original.get(ATTR_TOTAL_COST))
+    original_payment = _to_float(original.get(ATTR_ACTUAL_PAYMENT))
+    if original_payment is None:
+        original_payment = original_cost
+    original_discount = (
+        round(original_cost - original_payment, 2)
+        if original_cost is not None and original_payment is not None
+        else None
+    )
+
+    volume_given = ATTR_VOLUME in updates
+    cost_given = ATTR_TOTAL_COST in updates
+    payment_given = ATTR_ACTUAL_PAYMENT in updates
+
+    def _keep_original_discount() -> None:
+        """让重算后的加油费用继续享受原记录的优惠。"""
+        if original_discount is None:
+            merged.pop(ATTR_ACTUAL_PAYMENT, None)  # 原记录无金额：按无优惠
+        else:
+            merged.pop(ATTR_ACTUAL_PAYMENT, None)
+            merged[ATTR_KEEP_DISCOUNT] = original_discount
+
+    if volume_given or cost_given:
+        if not cost_given:
+            merged.pop(ATTR_TOTAL_COST, None)
+            _keep_original_discount()
+        elif not volume_given:
+            merged.pop(ATTR_VOLUME, None)
+            if not payment_given:
+                _keep_original_discount()
+        elif not payment_given:
+            # 量费同时给出但没填实付：视为按挂牌价全额支付（无优惠）
+            merged.pop(ATTR_ACTUAL_PAYMENT, None)
+    elif not payment_given:
+        # 只改里程/时间/备注/油品：金额原样沿用（量未变，无需按油价重算）
+        merged.pop(ATTR_VOLUME, None)
+
+    return merged
 
 
 def _import_sort_key(item: dict[str, Any], now: datetime) -> str:
@@ -317,14 +468,22 @@ async def _async_build_record(
     """Build a refuel record with smart price/volume/cost calculation.
 
     智能计算规则：
-    - 输入加油量 + 总费用 → 单价 = 费用/加油量（实际成交价）
+    - 输入加油量 + 加油费用 → 单价 = 费用/加油量（挂牌成交价）
     - 只输入加油量 → 费用 = 加油量 × 基准油价（当日或历史）
-    - 只输入总费用 → 加油量 = 费用 / 基准油价
+    - 只输入加油费用 → 加油量 = 费用 / 基准油价
     - 基准油价：加油日期为今天 → 当前缓存油价；
       历史日期 → 自动查询中石化历史调价周期匹配当日油价。
+
+    金额三件套（1.0.5 起）：
+    - 加油费用 total_cost：挂牌价合计，用于统计平均油价/每公里油费；
+    - 实际支付 actual_payment：本次真实付款，留空即无优惠（= 加油费用）；
+    - 优惠 discount = 加油费用 - 实际支付，由服务自动计算，无需手工填。
     """
     volume = data.get(ATTR_VOLUME)
     total_cost = data.get(ATTR_TOTAL_COST)
+    actual_payment = data.get(ATTR_ACTUAL_PAYMENT)
+    # 编辑时由 _merge_edit_data 传入的原优惠（内部键，不写入记录）
+    keep_discount = data.get(ATTR_KEEP_DISCOUNT)
     price_input = data.get(ATTR_PRICE)
     fuel_input = data.get(ATTR_FUEL_TYPE)
 
@@ -338,7 +497,7 @@ async def _async_build_record(
     fuel_key: str | None = None
 
     if total_cost is not None and volume is not None:
-        # 两者齐全，油价仅作展示
+        # 量+费齐全：单价即实际成交价，实付/优惠只做补齐，不再查油价
         if price_input is not None:
             price_value = float(price_input)
             price_source = "手动输入"
@@ -350,6 +509,9 @@ async def _async_build_record(
                 vehicle_info, fuel_input, set(runtime.price_coordinator.data.prices)
             )
             fuel_key = key
+        costs = _build_costs(
+            volume, total_cost, actual_payment, discount=keep_discount
+        )
     else:
         # 需要基准油价：显式传入的单价（成交价）优先，否则用当日/历史油价
         ref_price = None
@@ -401,17 +563,31 @@ async def _async_build_record(
                 )
             ref_price, price_source, price_approx = resolved
 
+        # 加油费用（挂牌价）基准：显式费用 > 实付（无优惠）> 量 × 油价 > 查价
+        if total_cost is not None:
+            reference_cost = float(total_cost)
+        elif actual_payment is not None:
+            reference_cost = float(actual_payment)
+        elif volume is not None:
+            reference_cost = round(float(volume) * ref_price, 2)
+        else:
+            reference_cost = None
+
         if volume is not None:
-            total_cost = round(float(volume) * ref_price, 2)
             price_value = round(ref_price, 2)
-        elif total_cost is not None:
-            volume = round(float(total_cost) / ref_price, 2)
+        elif reference_cost is not None:
+            volume = round(reference_cost / ref_price, 2)
             price_value = round(ref_price, 2)
         else:
             raise HomeAssistantError(
-                "只填写单价时无法计算加油量/费用："
-                "请至少填写 volume（加油量）或 total_cost（总费用）之一"
+                "只填写单价时无法计算加油量/费用：请至少填写 volume（加油量）、"
+                "total_cost（加油费用）或 actual_payment（实际支付）之一"
             )
+
+        costs = _build_costs(
+            volume, total_cost, actual_payment, reference_cost=reference_cost
+        )
+    _check_costs(costs)
 
     odometer = data.get(ATTR_ODOMETER)
 
@@ -420,7 +596,9 @@ async def _async_build_record(
             "date": when.isoformat(timespec="seconds"),
             "odometer": _to_float(odometer),
             "volume": _to_float(volume),
-            "total_cost": _to_float(total_cost),
+            "total_cost": _to_float(costs.total_cost),
+            "actual_payment": _to_float(costs.actual_payment),
+            "discount": _to_float(costs.discount),
             "price": price_value,
             "fuel_type": fuel_input or "",
             "fuel_key": fuel_key,
@@ -484,6 +662,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             ATTR_DATE: record["date"],
             ATTR_VOLUME: record["volume"],
             ATTR_TOTAL_COST: record["total_cost"],
+            ATTR_ACTUAL_PAYMENT: record["actual_payment"],
+            ATTR_DISCOUNT: record["discount"],
             ATTR_PRICE: record["price"],
             "price_source": built.price_source,
             "price_approximate": built.price_approximate,
@@ -491,10 +671,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             "consumption_last": result.get("last_consumption"),
         }
         _LOGGER.info(
-            "已记录加油：%s %sL / %s元 / %s元-L（油价来源：%s）",
+            "已记录加油：%s %sL / 费用%s元 / 实付%s元 / 优惠%s元 / %s元-L"
+            "（油价来源：%s）",
             vehicle,
             record["volume"],
             record["total_cost"],
+            record["actual_payment"],
+            record["discount"],
             record["price"],
             built.price_source,
         )
@@ -552,6 +735,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     ATTR_DATE: record["date"],
                     ATTR_VOLUME: record["volume"],
                     ATTR_TOTAL_COST: record["total_cost"],
+                    ATTR_ACTUAL_PAYMENT: record["actual_payment"],
+                    ATTR_DISCOUNT: record["discount"],
                     ATTR_PRICE: record["price"],
                     "price_source": built.price_source,
                 }
@@ -662,6 +847,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
         只改加油量或只改费用时，按记录日期对应的油价智能重算另一项；
         量与费同时给出则单价=费用/加油量。
+
+        金额三件套的编辑口径：
+        - 明确给出 actual_payment → 按该实付重算优惠（费用不变，或与量/费一起重算）；
+        - 量、费都没改（如只改里程/时间/备注）→ 金额与优惠原样沿用，不重新查油价；
+        - 只改量或只改费 → 另一项按记录日期的油价重算，原优惠金额保留；
+        - 量与费同时给出且未给实付 → 视为挂牌价全额支付，优惠 0。
         """
         store = _get_store(call.hass)
         vehicle = str(call.data[ATTR_VEHICLE]).strip()
@@ -679,26 +870,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             if k != "index" and not str(k).startswith("_")
         }
 
-        # 合并用户改动（未提供的字段沿用原记录）
-        merged: dict[str, Any] = {**original}
-        for key in (
-            ATTR_DATE,
-            ATTR_ODOMETER,
-            ATTR_VOLUME,
-            ATTR_TOTAL_COST,
-            ATTR_PRICE,
-            ATTR_FUEL_TYPE,
-            ATTR_NOTE,
-        ):
-            if key in call.data:
-                merged[key] = call.data[key]
-
-        # 只改量或只改费时，另一项必须按单价重算，而不是沿用旧值
-        # （两项同时给出才视为「实际成交」，此时单价 = 费用 / 量）
-        if ATTR_VOLUME in call.data and ATTR_TOTAL_COST not in call.data:
-            merged.pop(ATTR_TOTAL_COST, None)
-        elif ATTR_TOTAL_COST in call.data and ATTR_VOLUME not in call.data:
-            merged.pop(ATTR_VOLUME, None)
+        merged = _merge_edit_data(original, dict(call.data))
 
         if isinstance(merged.get(ATTR_DATE), str):
             merged[ATTR_DATE] = datetime.fromisoformat(merged[ATTR_DATE])

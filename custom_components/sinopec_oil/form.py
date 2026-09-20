@@ -42,6 +42,7 @@ class FormState:
     odometer: float | None = None
     volume: float | None = None
     total_cost: float | None = None
+    actual_payment: float | None = None
     fuel: str = "自动"
     when: datetime = field(default_factory=dt_util.now)
     note: str = ""
@@ -54,6 +55,7 @@ class FormState:
         self.odometer = odometer
         self.volume = None
         self.total_cost = None
+        self.actual_payment = None
         self.fuel = "自动"
         self.when = now
         self.note = ""
@@ -112,13 +114,20 @@ def form_device() -> DeviceInfo:
 def build_service_data(state: FormState) -> dict[str, Any] | None:
     """Assemble record_refuel service data from the form state.
 
-    返回 None 表示缺少必填信息（车辆为空，或加油量/费用均未填写；
+    返回 None 表示缺少必填信息（车辆为空，或加油量/加油费用/实际支付均未填写；
     里程表读数可选——表单会自动预填当前读数，服务端也支持沿用上次）。
+
+    加油费用与实际支付分列两个输入：只填其中一个时，服务端按"无优惠"处理；
+    两个都填则自动计算优惠 = 加油费用 - 实际支付。
     """
     vehicle = (state.vehicle or "").strip()
     if not vehicle:
         return None
-    if state.volume is None and state.total_cost is None:
+    if (
+        state.volume is None
+        and state.total_cost is None
+        and state.actual_payment is None
+    ):
         return None
 
     data: dict[str, Any] = {"vehicle": vehicle}
@@ -128,6 +137,8 @@ def build_service_data(state: FormState) -> dict[str, Any] | None:
         data["volume"] = state.volume
     if state.total_cost is not None:
         data["total_cost"] = state.total_cost
+    if state.actual_payment is not None:
+        data["actual_payment"] = state.actual_payment
     if state.fuel and state.fuel != "自动":
         data["fuel_type"] = state.fuel
     data["date"] = state.when

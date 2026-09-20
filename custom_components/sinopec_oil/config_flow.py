@@ -585,6 +585,9 @@ class SinopecOilOptionsFlow(OptionsFlow):
                     f"{rec.get('volume', '?')} L · "
                     f"{rec.get('total_cost', '?')} 元"
                 )
+                payment = rec.get("actual_payment")
+                if payment is not None:
+                    label += f" · 实付 {payment} 元"
                 odometer = rec.get("odometer")
                 if odometer is not None:
                     label += f" · {odometer} km"

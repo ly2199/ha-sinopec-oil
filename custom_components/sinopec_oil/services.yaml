@@ -4,6 +4,8 @@ record_refuel:
     记录一次加油，自动按当日/历史油价智能计算加油量与费用，并更新油耗统计。
     智能计价：量+费用 → 单价=费用/量；只填量 → 费用=量×基准油价；
     只填费用 → 量=费用/基准油价（历史日期自动查询对应调价周期油价）。
+    金额区分「加油费用」（挂牌价合计）与「实际支付」（真实付款），
+    优惠金额 = 加油费用 - 实际支付，由本服务自动计算，无需手工填。
   fields:
     vehicle:
       name: 车辆
@@ -41,10 +43,27 @@ record_refuel:
           unit_of_measurement: L
           mode: box
     total_cost:
-      name: 加油总费用
-      description: 本次加油实际支付的金额（元）。未填时按加油量与基准油价自动计算。
+      name: 加油费用
+      description: >-
+        本次加油的挂牌价合计（元），用于统计平均油价与每公里油费。
+        未填时按加油量与基准油价自动计算；实际支付更低时系统会自动算出优惠。
       required: false
       example: 350.0
+      selector:
+        number:
+          min: 0
+          max: 100000
+          step: 0.01
+          unit_of_measurement: 元
+          mode: box
+    actual_payment:
+      name: 实际支付
+      description: >-
+        本次实际付款金额（元）。优惠金额 = 加油费用 - 实际支付，由服务自动计算；
+        留空即视为无优惠（按加油费用全额支付）。只填实际支付时，加油费用按它取值，
+        加油量按"费用 ÷ 基准油价"反算。
+      required: false
+      example: 300.0
       selector:
         number:
           min: 0
@@ -89,7 +108,9 @@ record_refuel:
 
 import_refuel_records:
   name: 批量导入记录
-  description: 一次性导入多条历史加油记录（如从其他 App 迁移），导入后自动重算统计。
+  description: >-
+    一次性导入多条历史加油记录（如从其他 App 迁移），导入后自动重算统计。
+    每条同样区分加油费用与实际支付，优惠自动计算（实付留空即无优惠）。
   fields:
     vehicle:
       name: 车辆
@@ -101,14 +122,15 @@ import_refuel_records:
     records:
       name: 记录列表
       description: >-
-        记录数组，每条含 date、odometer、volume、total_cost、price、fuel_type、note
-        （均可选，计价规则与"记录加油"一致）。
+        记录数组，每条含 date、odometer、volume、total_cost、actual_payment、
+        price、fuel_type、note（均可选，计价规则与"记录加油"一致）。
       required: true
       example:
         - date: "2026-08-01 10:00:00"
           odometer: 10000
           volume: 50
           total_cost: 414.5
+          actual_payment: 380.0
         - date: "2026-08-15 10:00:00"
           odometer: 10600
           total_cost: 339.6
@@ -214,7 +236,9 @@ edit_refuel_record:
   name: 修改加油记录
   description: >-
     按序号修改一条加油记录，只填要改的字段。智能重算：只改加油量 → 按记录日期
-    的油价重算费用；只改费用 → 重算加油量；量与费同时给 → 单价=费用/加油量。
+    的油价重算加油费用（原优惠金额保留）；只改加油费用 → 反算加油量（原优惠保留）；
+    量与费同时给 → 单价=费用/加油量，未给实际支付则视为无优惠；
+    只改实际支付 → 加油费用不变，优惠随之变化。
   fields:
     vehicle:
       name: 车辆
@@ -246,7 +270,7 @@ edit_refuel_record:
           mode: box
     volume:
       name: 加油量
-      description: 修改为该加油量（升）。只填此项时按记录日期油价重算费用。
+      description: 修改为该加油量（升）。只填此项时按记录日期油价重算加油费用。
       required: false
       selector:
         number:
@@ -256,8 +280,23 @@ edit_refuel_record:
           unit_of_measurement: L
           mode: box
     total_cost:
-      name: 加油总费用
-      description: 修改为该费用（元）。只填此项时按记录日期油价重算加油量。
+      name: 加油费用
+      description: >-
+        修改为挂牌价合计（元）。只填此项时按记录日期油价反算加油量；
+        未同时给出实际支付时，优惠金额沿用原记录的优惠。
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100000
+          step: 0.01
+          unit_of_measurement: 元
+          mode: box
+    actual_payment:
+      name: 实际支付
+      description: >-
+        修改为实际付款金额（元）。优惠 = 加油费用 - 实际支付，自动重算；
+        留空且同时给了加油费用时视为无优惠。高于加油费用会被拒绝。
       required: false
       selector:
         number:

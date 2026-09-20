@@ -92,8 +92,15 @@ class RefuelSubmitButton(CoordinatorEntity, ButtonEntity):
                 await self._notify(
                     "⛔ 加油填表", "还没有车辆。请先在集成选项中添加车辆。"
                 )
-            elif state.volume is None and state.total_cost is None:
-                hint = "请至少填写加油量或费用之一（都填则自动算单价）。"
+            elif (
+                state.volume is None
+                and state.total_cost is None
+                and state.actual_payment is None
+            ):
+                hint = (
+                    "请至少填写加油量、加油费用或实际支付之一"
+                    "（加油费用与实际支付都填则自动算优惠）。"
+                )
                 if state.odometer is not None:
                     hint += "里程表读数已自动带出，无需重复填写。"
                 await self._notify("⛔ 加油填表", hint)
@@ -121,13 +128,24 @@ class RefuelSubmitButton(CoordinatorEntity, ButtonEntity):
         if response:
             volume = response.get("volume")
             cost = response.get("total_cost")
+            payment = response.get("actual_payment")
+            discount = response.get("discount")
             price = response.get("price")
             source = response.get("price_source")
             approx = response.get("price_approximate")
             lines.append(
                 f"加油量：{volume} L" if volume is not None else "加油量：—"
             )
-            lines.append(f"费用：{cost} 元" if cost is not None else "费用：—")
+            lines.append(
+                f"加油费用：{cost} 元" if cost is not None else "加油费用：—"
+            )
+            lines.append(
+                f"实际支付：{payment} 元"
+                if payment is not None
+                else "实际支付：—"
+            )
+            if discount:
+                lines.append(f"优惠：{discount} 元")
             if price is not None:
                 mark = "（约）" if approx else ""
                 lines.append(f"单价：{price} 元/L{mark}")

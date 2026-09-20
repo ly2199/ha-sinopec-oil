@@ -31,6 +31,7 @@ async def async_setup_entry(
             OdometerNumber(runtime),
             VolumeNumber(runtime),
             CostNumber(runtime),
+            PaymentNumber(runtime),
         ]
     )
 
@@ -118,7 +119,7 @@ class VolumeNumber(_FormNumberBase):
 
 
 class CostNumber(_FormNumberBase):
-    """加油费用（元，可选）。"""
+    """加油费用（元，可选；挂牌价合计，用于统计平均油价/每公里油费）。"""
 
     _attr_name = "加油费用"
     _attr_icon = "mdi:cash"
@@ -135,3 +136,23 @@ class CostNumber(_FormNumberBase):
     @property
     def native_value(self) -> float | None:
         return get_form_state(self.hass).total_cost
+
+
+class PaymentNumber(_FormNumberBase):
+    """实际支付（元，可选）。留空即无优惠；优惠 = 加油费用 - 实际支付，自动计算。"""
+
+    _attr_name = "实际支付"
+    _attr_icon = "mdi:credit-card-outline"
+    _attr_native_min_value = 0
+    _attr_native_max_value = 100000
+    _attr_native_step = 0.01
+    _attr_native_unit_of_measurement = UNIT_YUAN
+    _attr_unique_id = "refuel_form_payment"
+    _attr_suggested_display_precision = 2
+
+    def _apply(self, value: float) -> None:
+        get_form_state(self.hass).actual_payment = value or None
+
+    @property
+    def native_value(self) -> float | None:
+        return get_form_state(self.hass).actual_payment

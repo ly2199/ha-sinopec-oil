@@ -114,6 +114,8 @@ async def async_setup_entry(
                 VehicleOdometerSensor,
                 VehicleTotalVolumeSensor,
                 VehicleTotalCostSensor,
+                VehicleTotalPaymentSensor,
+                VehicleTotalDiscountSensor,
                 VehicleTotalDistanceSensor,
                 VehicleLastConsumptionSensor,
                 VehicleAvgConsumptionSensor,
@@ -148,7 +150,8 @@ async def async_setup_entry(
         known_vehicles.discard(vehicle)
         # 通过 unique_id 找到并删除该车的实体
         for stat_key in (
-            "odometer", "total_volume", "total_cost", "total_distance",
+            "odometer", "total_volume", "total_cost", "total_payment",
+            "total_discount", "total_distance",
             "last_consumption", "avg_consumption", "avg_price",
             "per_km_cost", "refuel_count", "last_record_date",
             "recent_record", "data_quality",
@@ -701,6 +704,29 @@ def _vehicle_device(vehicle: str) -> DeviceInfo:
     )
 
 
+def _actual_payment(record: dict[str, Any]) -> float | None:
+    """实际支付金额；1.0.5 之前的记录只有 total_cost（当时即实付）。"""
+    value = record.get("actual_payment")
+    if value is None:
+        value = record.get("total_cost")
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _discount(record: dict[str, Any]) -> float | None:
+    """优惠金额 = 加油费用 - 实际支付（缺任一则为 None）。"""
+    cost = record.get("total_cost")
+    payment = _actual_payment(record)
+    if cost is None or payment is None:
+        return None
+    try:
+        return round(float(cost) - payment, 2)
+    except (TypeError, ValueError):
+        return None
+
+
 class VehicleStatsSensor(CoordinatorEntity, SensorEntity):
     """Base class for vehicle refuel statistics sensors."""
 
@@ -775,7 +801,7 @@ class VehicleTotalVolumeSensor(VehicleStatsSensor):
 
 
 class VehicleTotalCostSensor(VehicleStatsSensor):
-    """Total refuel cost."""
+    """Total refuel cost（累计加油费用 = 各次挂牌价合计）。"""
 
     STAT_KEY = "total_cost"
     STAT_NAME = "累计加油费用"
@@ -787,6 +813,66 @@ class VehicleTotalCostSensor(VehicleStatsSensor):
     @property
     def native_value(self) -> float | None:
         return self._stats().get("total_cost")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        stats = self._stats()
+        return {
+            "vehicle": self._vehicle,
+            "total_payment": stats.get("total_payment"),
+            "total_discount": stats.get("total_discount"),
+            "avg_discount_rate": stats.get("avg_discount_rate"),
+        }
+
+
+class VehicleTotalPaymentSensor(VehicleStatsSensor):
+    """实际支付累计（优惠后真实付款）。"""
+
+    STAT_KEY = "total_payment"
+    STAT_NAME = "累计实际支付"
+    _attr_icon = "mdi:credit-card-check-outline"
+    _attr_native_unit_of_measurement = UNIT_YUAN
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_suggested_display_precision = 2
+
+    @property
+    def native_value(self) -> float | None:
+        return self._stats().get("total_payment")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        stats = self._stats()
+        return {
+            "vehicle": self._vehicle,
+            "total_cost": stats.get("total_cost"),
+            "total_discount": stats.get("total_discount"),
+        }
+
+
+class VehicleTotalDiscountSensor(VehicleStatsSensor):
+    """Total discount = 累计加油费用 - 累计实际支付。"""
+
+    STAT_KEY = "total_discount"
+    STAT_NAME = "累计优惠"
+    _attr_icon = "mdi:sale-outline"
+    _attr_native_unit_of_measurement = UNIT_YUAN
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_suggested_display_precision = 2
+
+    @property
+    def native_value(self) -> float | None:
+        return self._stats().get("total_discount")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        stats = self._stats()
+        return {
+            "vehicle": self._vehicle,
+            "avg_discount_rate": stats.get("avg_discount_rate"),
+            "last_discount": stats.get("last_discount"),
+            "total_cost": stats.get("total_cost"),
+            "total_payment": stats.get("total_payment"),
+        }
 
 
 class VehicleTotalDistanceSensor(VehicleStatsSensor):
@@ -929,6 +1015,10 @@ class VehicleRecentRecordSensor(VehicleStatsSensor):
             parts.append(f"{rec['volume']}L")
         if rec.get("total_cost") is not None:
             parts.append(f"{rec['total_cost']}元")
+        if rec.get("actual_payment") is not None:
+            parts.append(f"实付{rec['actual_payment']}元")
+        if rec.get("discount"):
+            parts.append(f"优惠{rec['discount']}元")
         if rec.get("price") is not None:
             parts.append(f"{rec['price']}元/L")
         return f"{str(rec.get('date', ''))[:10]} · " + (
@@ -958,7 +1048,10 @@ class VehicleRecentRecordSensor(VehicleStatsSensor):
                     "date": rec.get("date"),
                     "odometer": odo,
                     "volume": rec.get("volume"),
+                    # 加油费用（挂牌价）、实际支付与优惠金额（= 费用 - 实付）
                     "total_cost": rec.get("total_cost"),
+                    "actual_payment": _actual_payment(rec),
+                    "discount": _discount(rec),
                     "price": rec.get("price"),
                     "fuel_type": rec.get("fuel_type") or "",
                     "note": rec.get("note") or "",

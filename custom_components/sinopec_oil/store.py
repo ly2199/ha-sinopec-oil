@@ -33,6 +33,27 @@ def _parse_date(value: Any) -> dt_date | None:
         return None
 
 
+def _actual_payment_of(record: dict[str, Any]) -> float | None:
+    """Return the amount actually paid for one record.
+
+    1.0.5 之前的记录只有 total_cost（当时即"实际支付"），
+    缺少 actual_payment 时按它回退，保证历史数据金额口径不变。
+    """
+    payment = _to_float(record.get("actual_payment"))
+    if payment is None:
+        payment = _to_float(record.get("total_cost"))
+    return payment
+
+
+def _discount_of(record: dict[str, Any]) -> float | None:
+    """Return 优惠金额 = 加油费用(total_cost) - 实际支付(actual_payment)。"""
+    cost = _to_float(record.get("total_cost"))
+    payment = _actual_payment_of(record)
+    if cost is None or payment is None:
+        return None
+    return round(cost - payment, 2)
+
+
 def compute_stats(
     records: list[dict[str, Any]],
     initial_odometer: float | None = None,
@@ -49,6 +70,13 @@ def compute_stats(
     - 累计行驶里程：若配置了初始里程，则为 最新里程-初始里程；
       否则为有效区间里程差之和。
 
+    金额口径（每条的 total_cost 为加油费用即挂牌价，actual_payment 为实际支付）：
+    - 优惠金额 discount = 加油费用 - 实际支付（缺 actual_payment 的旧记录视为无优惠）
+    - 累计实付 total_payment、累计优惠 total_discount 为逐条求和
+      （每条单独四舍五入，与记录里展示的优惠金额一致）
+    - 平均油价、每公里油费仍按「加油费用」计算，与历史统计口径一致；
+      avg_discount_rate = 累计优惠 / 累计加油费用 * 100
+
     数据完整性分两类，互不阻塞：
     - 缺口（odometer_gaps）：相邻记录缺少里程读数，该区间不参与油耗
       统计，但不影响其他区间，也不算错误；
@@ -59,6 +87,10 @@ def compute_stats(
         "refuel_count": len(records),
         "total_volume": 0.0,
         "total_cost": 0.0,
+        "total_payment": 0.0,
+        "total_discount": 0.0,
+        "avg_discount_rate": None,
+        "last_discount": None,
         "odometer": None,
         "total_distance": None,
         "record_distance": 0.0,
@@ -85,6 +117,9 @@ def compute_stats(
     gaps = 0
     total_volume = 0.0
     total_cost = 0.0
+    total_payment = 0.0
+    total_discount = 0.0
+    last_discount = None
     consumption_volumes = 0.0
     record_distance = 0.0
     last_distance = None
@@ -95,8 +130,14 @@ def compute_stats(
         odometer = _to_float(rec.get("odometer"))
         volume = _to_float(rec.get("volume")) or 0.0
         cost = _to_float(rec.get("total_cost")) or 0.0
+        # 旧记录缺 actual_payment 时按 total_cost 计（无优惠）
+        payment = _actual_payment_of(rec)
+        payment = cost if payment is None else payment
+        discount = round(cost - payment, 2)
         total_volume += volume
         total_cost += cost
+        total_payment += payment
+        total_discount += discount
         rec_date = str(rec.get("date", ""))[:16]
 
         if prev is not None:
@@ -149,10 +190,24 @@ def compute_stats(
     if consumption_volumes > 0 and record_distance > 0:
         avg_consumption = round(consumption_volumes / record_distance * 100, 2)
 
+    # 最近一次加油的优惠金额（与最近加油日期同一口径）
+    last_discount = _discount_of(sorted_records[-1])
+
+    total_payment = round(total_payment, 2)
+    total_discount = round(total_discount, 2)
+
     stats.update(
         {
             "total_volume": round(total_volume, 2),
             "total_cost": round(total_cost, 2),
+            "total_payment": total_payment,
+            "total_discount": total_discount,
+            "avg_discount_rate": (
+                round(total_discount / total_cost * 100, 2)
+                if total_cost > 0
+                else None
+            ),
+            "last_discount": last_discount,
             "odometer": last_odometer,
             "total_distance": round(total_distance, 1) if total_distance is not None else None,
             "record_distance": round(record_distance, 1),
