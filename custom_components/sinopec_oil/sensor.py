@@ -892,8 +892,13 @@ class VehicleTotalDistanceSensor(VehicleStatsSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        stats = self._stats()
         return {
-            "record_period_distance": self._stats().get("record_distance"),
+            "vehicle": self._vehicle,
+            "record_period_distance": stats.get("record_distance"),
+            "odometer_records": stats.get("odometer_records"),
+            "odometer_coverage": stats.get("odometer_coverage"),
+            "odometer_max_gap": stats.get("odometer_max_gap"),
         }
 
 
@@ -943,7 +948,7 @@ class VehicleAvgPriceSensor(VehicleStatsSensor):
 
 
 class VehiclePerKmCostSensor(VehicleStatsSensor):
-    """Fuel cost per kilometer."""
+    """Fuel cost per kilometer（里程读数不足或跨度太短时不可用，属性给出说明）。"""
 
     STAT_KEY = "per_km_cost"
     STAT_NAME = "每公里油费"
@@ -955,6 +960,28 @@ class VehiclePerKmCostSensor(VehicleStatsSensor):
     @property
     def native_value(self) -> float | None:
         return self._stats().get("per_km_cost")
+
+    @property
+    def available(self) -> bool:
+        """跨度内算不出比值时显示"未知"，而不是给 0 或误导性数字。"""
+        return (
+            super().available
+            and self._stats().get("per_km_cost") is not None
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        stats = self._stats()
+        return {
+            "vehicle": self._vehicle,
+            "reliable": stats.get("per_km_cost_reliable"),
+            "note": stats.get("per_km_cost_note"),
+            "measured_span": stats.get("measured_span"),
+            "in_span_cost": stats.get("in_span_cost"),
+            "odometer_records": stats.get("odometer_records"),
+            "odometer_coverage": stats.get("odometer_coverage"),
+            "odometer_max_gap": stats.get("odometer_max_gap"),
+        }
 
 
 class VehicleRefuelCountSensor(VehicleStatsSensor):
@@ -1115,9 +1142,23 @@ class VehicleQualitySensor(VehicleStatsSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         stats = self._stats()
+        coverage = stats.get("odometer_coverage")
+        records = stats.get("odometer_records")
+        count = stats.get("refuel_count")
         return {
             "vehicle": self._vehicle,
             "sinopec_role": "sinopec_quality",
             "problems": stats.get("quality_problems") or [],
             "odometer_gaps": int(stats.get("odometer_gaps") or 0),
+            # 里程读数覆盖情况：覆盖率低时"每公里油费"不可用
+            "odometer_records": records,
+            "odometer_coverage": coverage,
+            "odometer_max_gap": stats.get("odometer_max_gap"),
+            "coverage_text": (
+                f"里程读数 {records}/{count} 条（{coverage}%）"
+                if records is not None and count
+                else None
+            ),
+            "per_km_cost_reliable": stats.get("per_km_cost_reliable"),
+            "per_km_cost_note": stats.get("per_km_cost_note"),
         }

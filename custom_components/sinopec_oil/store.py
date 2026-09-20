@@ -74,8 +74,18 @@ def compute_stats(
     - 优惠金额 discount = 加油费用 - 实际支付（缺 actual_payment 的旧记录视为无优惠）
     - 累计实付 total_payment、累计优惠 total_discount 为逐条求和
       （每条单独四舍五入，与记录里展示的优惠金额一致）
-    - 平均油价、每公里油费仍按「加油费用」计算，与历史统计口径一致；
+    - 平均油价仍按「加油费用 ÷ 加油量」计算，与历史统计口径一致；
       avg_discount_rate = 累计优惠 / 累计加油费用 * 100
+
+    每公里油费（1.0.6 修正，见 _odometer_coverage_stats）：
+    - 分母 = 里程计费跨度（首条有里程读数 → 最新有里程读数），
+      分子 = 跨度内费用（累计费用剔除首箱），保证
+      「每公里油费 × 里程计费跨度 = 跨度内费用」这条不变量，
+      不会出现"分母只有最近一段、分子却是全部历史费用"的错位；
+    - 里程读数覆盖率 < 50% 且存在 > 2000 km 空档时，返回 None 并给出
+      per_km_cost_note 说明原因（宁可不显示，也不给出误导性数字）；
+    - 附带 odometer_records / odometer_coverage / odometer_max_gap /
+      measured_span / in_span_cost 供传感器与卡片展示数据可信度。
 
     数据完整性分两类，互不阻塞：
     - 缺口（odometer_gaps）：相邻记录缺少里程读数，该区间不参与油耗
@@ -99,6 +109,13 @@ def compute_stats(
         "avg_consumption": None,
         "avg_price": None,
         "per_km_cost": None,
+        "per_km_cost_reliable": False,
+        "per_km_cost_note": None,
+        "measured_span": None,
+        "in_span_cost": None,
+        "odometer_records": 0,
+        "odometer_coverage": 0.0,
+        "odometer_max_gap": None,
         "last_record_date": None,
         "quality_problems": [],
         "odometer_gaps": 0,
@@ -125,6 +142,9 @@ def compute_stats(
     last_distance = None
     last_consumption = None
     prev = None
+    odometer_records = 0
+    first_odometer = None
+    first_odometer_rec = None
 
     for idx, rec in enumerate(sorted_records):
         odometer = _to_float(rec.get("odometer"))
@@ -139,6 +159,11 @@ def compute_stats(
         total_payment += payment
         total_discount += discount
         rec_date = str(rec.get("date", ""))[:16]
+        if odometer is not None:
+            odometer_records += 1
+            if first_odometer is None:
+                first_odometer = odometer
+                first_odometer_rec = rec
 
         if prev is not None:
             prev_odo = _to_float(prev.get("odometer"))
@@ -196,6 +221,23 @@ def compute_stats(
     total_payment = round(total_payment, 2)
     total_discount = round(total_discount, 2)
 
+    # ------------------------------------------------------------------
+    # 每公里油费（1.0.6 修正）
+    #
+    # 必须满足不变量：每公里油费 × 累计行驶里程 = 对应的加油费用，
+    # 否则「只换分子不换分母」会造成分子分母错位（历史 bug：分母只有最近
+    # 一段里程，分子却是全部加油费用，算出 128 元/km 这种数字）。
+    #
+    # 口径：
+    # - 分母 = 里程计费跨度 = 最新有里程读数 − 首条有里程读数
+    #   （与累计行驶里程的分母一致，只是基准取"首条读数"而非配置的初始里程，
+    #   这样即使初始里程配置有误，每公里油费也不会被算爆）
+    # - 分子 = 跨度内的加油费用 = 累计加油费用 − 首条有里程记录的加油费用
+    #   （首箱油在统计基准之前就已消耗，与平均油耗"首箱不计"同一假设）
+    # - 里程读数太稀疏时（覆盖率 < 50% 且存在 > 2000 km 的无读数空档），
+    #   这个比值没有足够数据支撑，直接返回 None 并给出说明，
+    #   宁可显示"未知"也不给会误导人的数字。
+    # ------------------------------------------------------------------
     stats.update(
         {
             "total_volume": round(total_volume, 2),
@@ -215,17 +257,120 @@ def compute_stats(
             "last_consumption": last_consumption,
             "avg_consumption": avg_consumption,
             "avg_price": round(total_cost / total_volume, 2) if total_volume > 0 else None,
-            "per_km_cost": (
-                round(total_cost / total_distance, 3)
-                if total_cost > 0 and total_distance
-                else None
-            ),
             "last_record_date": sorted_records[-1].get("date"),
             "quality_problems": problems,
             "odometer_gaps": gaps,
         }
     )
+    stats.update(
+        _odometer_coverage_stats(
+            sorted_records,
+            total_cost,
+            first_odometer,
+            first_odometer_rec,
+            last_odometer,
+            odometer_records,
+        )
+    )
     return stats
+
+
+def _odometer_coverage_stats(
+    sorted_records: list[dict[str, Any]],
+    total_cost: float,
+    first_odometer: float | None,
+    first_odometer_rec: dict[str, Any] | None,
+    last_odometer: float | None,
+    odometer_records: int,
+) -> dict[str, Any]:
+    """里程读数覆盖情况 + 每公里油费口径（见 compute_stats 的说明）。
+
+    判定原则：
+    - 跨度太短（< 500 km）时，"跨度内费用 ÷ 跨度"只是几十上百公里的样本，
+      噪声大且容易被首箱油影响 → 返回 None；
+    - 跨度正常但里程读数稀疏（覆盖率 < 50% 或存在 > 2000 km 空档）时，
+      比值本身仍可用（分子分母同跨度），但样本可信度低 →
+      正常给出数值，同时置 per_km_cost_reliable=False 并用 note 说明；
+    - 里程读数不足 2 条（无法确定跨度）→ 返回 None 并说明如何补填。
+    """
+    total_records = len(sorted_records)
+    coverage = (
+        round(odometer_records / total_records * 100, 1) if total_records else 0.0
+    )
+
+    # 相邻两条"有里程"记录之间的最大空档（判断里程连续性够不够）
+    readings: list[float] = []
+    for rec in sorted_records:
+        value = _to_float(rec.get("odometer"))
+        if value is not None:
+            readings.append(value)
+    max_gap = max(
+        (b - a for a, b in zip(readings, readings[1:])),
+        default=0.0,
+    )
+
+    measured_span = None
+    if first_odometer is not None and last_odometer is not None:
+        span = last_odometer - first_odometer
+        if span > 0:
+            measured_span = round(span, 1)
+
+    sample_ok = bool(measured_span and measured_span >= 500.0)
+    gap_ok = max_gap > 0 and max_gap <= 2000.0
+    reliable = bool(sample_ok and (coverage >= 50.0 or gap_ok))
+
+    in_span_cost = None
+    per_km_cost = None
+    note = None
+    if measured_span:
+        first_cost = (
+            _to_float(first_odometer_rec.get("total_cost")) or 0.0
+            if first_odometer_rec
+            else 0.0
+        )
+        in_span_cost = round(total_cost - first_cost, 2)
+        if sample_ok and in_span_cost > 0:
+            # 四舍五入到与展示精度一致，保证
+            # 「每公里油费 × 里程计费跨度 = 跨度内费用」这条不变量能对上
+            per_km_cost = round(in_span_cost / measured_span, 3)
+
+    if per_km_cost is None:
+        if not measured_span:
+            note = (
+                "里程读数不足 2 条，无法确定计费跨度，每公里油费不可计算；"
+                "补填任意两次加油的里程表读数即可"
+            )
+        else:
+            note = (
+                f"里程读数仅 {odometer_records}/{total_records} 条"
+                f"（{coverage:g}%），计费跨度只有 {measured_span:g} km，"
+                "样本太短不足以代表长期油费水平；"
+                "补填更多带里程的加油记录后自动恢复"
+            )
+    elif not reliable:
+        if coverage < 50.0:
+            note = (
+                f"里程读数仅 {odometer_records}/{total_records} 条"
+                f"（{coverage:g}%），已按 {measured_span:g} km 跨度"
+                f"（费用 {in_span_cost:g} 元，首箱不计）估算；"
+                "中间缺少读数，无法交叉核对异常，建议按年补填里程表读数"
+            )
+        else:
+            note = (
+                f"相邻里程读数之间存在 {max_gap:g} km 的空档，"
+                f"已按 {measured_span:g} km 跨度估算，建议补填中间记录"
+            )
+
+    return {
+        "per_km_cost": per_km_cost,
+        "per_km_cost_reliable": reliable,
+        "per_km_cost_note": note,
+        "measured_span": measured_span,
+        "in_span_cost": in_span_cost,
+        "odometer_records": odometer_records,
+        "odometer_coverage": coverage,
+        "odometer_max_gap": round(max_gap, 1) if max_gap else None,
+    }
 
 
 class RefuelStore:

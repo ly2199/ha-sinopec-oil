@@ -3,7 +3,7 @@
  *
  * 安装：将本文件复制到 /config/www/sinopec-oil-card.js，然后在
  * 仪表盘 → 右上角 ⋮ → 管理资源 → 添加
- *   URL: /local/sinopec-oil-card.js   版本: 1.0.5
+ *   URL: /local/sinopec-oil-card.js   版本: 1.0.6
  * 使用：仪表盘添加卡片 → 手动 →
  *   type: custom:sinopec-oil-card
  * 可选: title: 我的油卡   vehicle: 某辆车（不填则记住上次选择）
@@ -12,6 +12,9 @@
  * 无需填写任何实体 ID。
  *
  * 页签：加油 · 历史 · 油价 · 统计
+ * 1.0.6 统计修正：每公里油费改用「里程计费跨度内费用 ÷ 该跨度里程」，
+ *       里程读数覆盖率不足时显示为未知并给出原因；
+ *       统计页新增里程覆盖率提示。
  * 1.0.5 记账口径：区分「加油费用」（挂牌价合计）与「实际支付」（真实付款），
  *       优惠金额 = 加油费用 - 实际支付，由后端自动计算；
  *       留空实际支付即视为无优惠；历史记录与统计磁贴同步展示优惠。
@@ -1100,9 +1103,20 @@
         `<div class="stat"><span class="stat-icon"><ha-icon icon="${icon}"></ha-icon></span>
          <div class="v">${v == null ? '—' : fmt(v, d)}</div><div class="k">${k}</div></div>`;
 
+      // 每公里油费：能算就给数值（读数稀疏时附"估算值"提醒），
+      // 算不出来（里程读数不足 2 条 / 跨度太短）才显示"—"并说明原因
+      const perKmOk = s.per_km_cost != null;
+      const perKmLow = perKmOk && s.per_km_cost_reliable === false;
+      const coverage = s.odometer_coverage;
+      const odoRecords = s.odometer_records;
+      const coverageText = (coverage == null)
+        ? ''
+        : `里程读数 ${esc(odoRecords)} 条（覆盖率 ${fmt(coverage, 1)}%）`;
+
       return `
         ${problems.length ? `<div class="msg warn"><ha-icon icon="mdi:alert-outline"></ha-icon><div><b>数据需修正（${problems.length} 项）——这些区间已排除在统计外</b>${problems.map((p) => `• ${esc(p)}`).join('<br>')}</div></div>` : ''}
         ${gaps ? `<div class="msg info"><ha-icon icon="mdi:information-outline"></ha-icon><div><b>${gaps} 处区间缺少里程读数</b>未计入里程与油耗统计。</div></div>` : ''}
+        ${!perKmOk ? `<div class="msg warn"><ha-icon icon="mdi:alert-outline"></ha-icon><div><b>每公里油费暂不可用</b>${esc(s.per_km_cost_note || '里程读数不足，无法计算每公里油费。')}</div></div>` : (perKmLow ? `<div class="msg info"><ha-icon icon="mdi:information-outline"></ha-icon><div><b>每公里油费为估算值</b>${esc(s.per_km_cost_note || '')}</div></div>` : '')}
         <div class="grid">
           ${tile('mdi:counter', s.odometer, '当前里程 km', 1)}
           <div class="stat"><span class="stat-icon"><ha-icon icon="mdi:gas-station"></ha-icon></span>
@@ -1118,12 +1132,15 @@
             <div class="v">${s.total_discount == null ? '—' : fmt(s.total_discount, 2)}<span class="unit">元</span></div>
             <div class="k">累计优惠${s.avg_discount_rate != null ? ` · 优惠率 ${fmt(s.avg_discount_rate, 1)}%` : ''}</div></div>
           <div class="stat wide"><span class="stat-icon"><ha-icon icon="mdi:calculator"></ha-icon></span>
-            <div class="v">${s.per_km_cost == null ? '—' : fmt(s.per_km_cost, 3)}<span class="unit">元</span></div>
-            <div class="k">每公里油费</div></div>
+            <div class="v">${perKmOk ? (perKmLow ? '≈' : '') + fmt(s.per_km_cost, 3) : '—'}<span class="unit">元</span></div>
+            <div class="k">每公里油费${perKmOk && s.measured_span != null ? ` · 按 ${fmt(s.measured_span, 0)} km 跨度` : perKmOk ? '' : ' · 里程读数不足'}</div></div>
         </div>
         <div class="hint">数值直接取自集成后端统计（与「加油记录」设备下的传感器一致）。
+          ${coverageText ? `<b>${coverageText}</b>；` : ''}
+          累计行驶 = 最新里程读数 − 车辆初始里程（未设初始里程时取有里程记录的区间里程之和）；
+          每公里油费 = 里程计费跨度内费用 ÷ 该跨度里程（跨度取首末两条有里程读数之差，首箱油不计）。
           平均油耗 = 除去首箱的区间加油量合计 ÷ 区间里程合计（加满假设）。
-          累计优惠 = 各次（加油费用 − 实际支付）之和；平均油价与每公里油费仍按加油费用计算。
+          累计优惠 = 各次（加油费用 − 实际支付）之和；平均油价按加油费用计算。
           数据质量：${q ? `<span class="pill ${problems.length ? 'bad' : 'good'}">${esc(q.state)}</span>` : '—'}</div>`;
     }
 
